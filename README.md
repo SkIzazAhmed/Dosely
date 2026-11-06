@@ -13,7 +13,7 @@ npm install
 cp .env.example .env            # edit DATABASE_URL
 createdb pharmacy_mvp           # or: psql -c 'CREATE DATABASE pharmacy_mvp'
 npm run migrate                 # apply db/migrations/*.sql
-npm run seed                    # demo data (from Commit 3, Nov 8)
+npm run seed                    # demo users (shops/patients from Commit 3, Nov 8)
 npm start                       # http://localhost:3000/health
 ```
 
@@ -23,7 +23,7 @@ npm start                       # http://localhost:3000/health
 | `npm run migrate` | apply pending migrations |
 | `npm run migrate:status` | list applied `[x]` and pending `[ ]` migrations |
 | `npm run seed` | run `src/db/seeds/*.js` (idempotent) |
-| `npm test` | unit + DB tests (DB tests skip if Postgres isn't reachable) |
+| `npm test` | unit + DB tests (DB tests skip if Postgres isn't reachable; they add users with random emails) |
 
 ## Layout
 
@@ -38,10 +38,69 @@ src/
     seed.js          seed runner
     migrations/      NNN_name.sql
     seeds/           NNN_name.js  -> export async function seed(client)
-  middleware/        errorHandler (auth, rbac, idempotency land Nov 6)
-  shared/            errors.js (AppError, ErrorCodes), enums.js, asyncHandler.js
-  modules/           users, shops, patients, phones, notifications, …
+  middleware/        auth, rbac, idempotency, errorHandler
+  shared/            errors, enums, validate, password, jwt, asyncHandler
+  modules/           auth, users, doctors, shops, patients, phones, notifications, …
 ```
+
+## Demo logins
+
+After `npm run seed` (password for all: `Dosely@123`, or `SEED_PASSWORD` in `.env`):
+
+| Email | Role | Notes |
+| --- | --- | --- |
+| admin@dosely.dev | ADMIN | |
+| doctor@dosely.dev | DOCTOR | registration no. KMC-100245, can send requests |
+| doctor.noreg@dosely.dev | DOCTOR | no registration no., can't send requests |
+| shopkeeper@dosely.dev | SHOPKEEPER | becomes shop OWNER in Commit 3 |
+| staff@dosely.dev | SHOPKEEPER | becomes shop STAFF in Commit 3 |
+
+```bash
+curl -s -X POST localhost:3000/auth/login -H 'content-type: application/json' \
+  -d '{"email":"doctor@dosely.dev","password":"Dosely@123"}'
+# → { "token": "eyJ…", "tokenType": "Bearer", "expiresIn": "1d", "user": { … } }
+curl -s localhost:3000/auth/me -H "authorization: Bearer <token>"
+```
+
+## API so far
+
+All routes except `POST /auth/login` need `Authorization: Bearer <token>`.
+`POST` routes that create something need an `Idempotency-Key` header (any unique string, e.g. a UUID).
+
+| Method & path | Who | What |
+| --- | --- | --- |
+| POST /auth/login | anyone | `{ email, password }` → token + user |
+| GET /auth/me | logged in | current user (+ `doctor` profile for doctors) |
+| POST /users | ADMIN | `{ role, fullName, email?, password }` |
+| GET /users | ADMIN | `?role=&isActive=&search=&limit=&offset=` |
+| GET /users/:id | self or ADMIN | |
+| PATCH /users/:id | self or ADMIN | `{ fullName?, email?, password?, currentPassword? }` — role can't change |
+| DELETE /users/:id | ADMIN | deactivates (no hard delete) |
+| POST /users/:id/activate | ADMIN | |
+| POST /doctors | DOCTOR (own) or ADMIN (`userId`) | `{ registrationNo?, specialization?, qualification?, clinicName? }` |
+| GET /doctors, /doctors/:id | logged in | list / one |
+| GET /doctors/me | DOCTOR | own profile, incl. `canSendRequests` |
+| PATCH /doctors/:id | that doctor or ADMIN | |
+| DELETE /doctors/:id, POST /doctors/:id/activate | ADMIN | deactivate / activate |
+
+### Using auth in your module (Rachana, Anushka)
+
+```js
+const { authenticate } = require('../../middleware/auth');
+const { requireRole, requireShopStaff } = require('../../middleware/rbac');
+const { idempotency } = require('../../middleware/idempotency');
+const doctors = require('../doctors/doctors.service');
+
+router.use(authenticate);                                   // sets req.user = { id, role, fullName, email, … }
+router.post('/', requireRole('DOCTOR'), idempotency(), asyncHandler(async (req, res) => {
+  const doctor = await doctors.assertCanSendRequests(req.user.id); // throws DOCTOR_REG_NO_REQUIRED
+  …
+}));
+router.patch('/shops/:shopId/inventory/:id', requireShopStaff(), …);         // any active staff (shops land Nov 8)
+router.delete('/shops/:shopId/staff/:id', requireShopStaff({ owner: true }), …); // OWNER only
+```
+
+ADMIN passes `requireShopStaff` for every shop. Idempotent replays carry the header `Idempotent-Replayed: true`.
 
 ## Team conventions
 
@@ -118,7 +177,7 @@ Patients have no login, so `IN_APP` to a patient is a validation error.
 | # | Due | Deliverable |
 | --- | --- | --- |
 | 1 | Tue Nov 4 | Scaffold, migration 001 (enums + conventions), error codes, notification stubs ✅ |
-| 2 | Thu Nov 6 | Users, bcrypt, JWT login, rbac + idempotency middleware, doctors |
+| 2 | Thu Nov 6 | Users, bcrypt, JWT login, rbac + idempotency middleware, doctors ✅ |
 | 3 | Sat Nov 8 | Shops, shop staff, patients + seed data |
 | 4 | Mon Nov 10 | Phone numbers, validator, CRUD, rules P1–P10 |
 | 5 | Wed Nov 12 | Rules P11–P13, verify route, real notification.service + inbox |

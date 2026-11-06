@@ -4,6 +4,9 @@ const express = require('express');
 const { pool } = require('./db/pool');
 const asyncHandler = require('./shared/asyncHandler');
 const { errorHandler, notFound } = require('./middleware/errorHandler');
+const authRoutes = require('./modules/auth/auth.routes');
+const userRoutes = require('./modules/users/users.routes');
+const doctorRoutes = require('./modules/doctors/doctors.routes');
 
 function createApp() {
   const app = express();
@@ -24,8 +27,11 @@ function createApp() {
     })
   );
 
-  // Module routers are mounted here as they land:
-  //   Commit 2 (Nov 6):  /auth, /users, /doctors
+  app.use('/auth', authRoutes);
+  app.use('/users', userRoutes);
+  app.use('/doctors', doctorRoutes);
+
+  // Module routers still to land:
   //   Commit 3 (Nov 8):  /shops, /shops/:id/staff, /patients
   //   Commit 4 (Nov 10): /{users,patients,shops}/:id/phones, /phones/:id/verify
   //   Commit 5 (Nov 12): /notifications

@@ -15,6 +15,7 @@ const ErrorCodes = Object.freeze({
   UNAUTHENTICATED: { status: 401, message: 'Authentication required' },
   INVALID_CREDENTIALS: { status: 401, message: 'Invalid email/phone or password' },
   TOKEN_EXPIRED: { status: 401, message: 'Token expired' },
+  ACCOUNT_INACTIVE: { status: 403, message: 'This account is deactivated' },
   FORBIDDEN: { status: 403, message: 'You do not have permission for this action' },
   NOT_FOUND: { status: 404, message: 'Resource not found' },
   ROUTE_NOT_FOUND: { status: 404, message: 'Route not found' },

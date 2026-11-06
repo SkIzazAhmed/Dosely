@@ -25,7 +25,7 @@ const config = Object.freeze({
   }),
 
   auth: Object.freeze({
-    jwtSecret: process.env.JWT_SECRET || '',
+    jwtSecret: process.env.JWT_SECRET || (env === 'production' ? '' : 'dosely-dev-only-secret'),
     jwtExpiresIn: process.env.JWT_EXPIRES_IN || '1d',
     bcryptCost: Math.max(10, int('BCRYPT_COST', 10)), // A3: cost >= 10
   }),
@@ -35,8 +35,8 @@ const config = Object.freeze({
   }),
 });
 
-if (config.isProd && (!config.auth.jwtSecret || config.auth.jwtSecret.startsWith('change-me'))) {
-  throw new Error('Config: JWT_SECRET must be set to a real secret in production');
+if (config.isProd && (!config.auth.jwtSecret || config.auth.jwtSecret.startsWith('change-me') || config.auth.jwtSecret.length < 32)) {
+  throw new Error('Config: JWT_SECRET must be set to a real secret (32+ characters) in production');
 }
 
 module.exports = config;
