@@ -235,6 +235,37 @@ await stock.dispense({ shopId, medicineId, quantity, requestId, performedBy, ide
 | 6 | Fri Nov 14 | Thresholds (B11), expiryScan + lowStockScan jobs, post-dispense low-stock check (B12), seed stock |
 | 7 | Sun Nov 16 | FEFO + concurrent dispense tests, edge cases 3, 5, 6, 14, 15; merge to main |
 
+## Requests and referrals (Anushka)
+
+Migration `020` (numbers 020–029 claimed for requests + referrals): `stock_requests`, `referrals`,
+`request_number_counters`, enums `request_urgency`, `request_status`, `referral_status`, and
+`next_request_no()` → `REQ-YYYY-NNNNNN`.
+
+- One request = one medicine; quantity 1–10,000; it can only be sent when the requested quantity is more
+  than the shop's available quantity (stored as `available_qty_snapshot`); doctor note ≤ 500 characters.
+- `FULFILLED` needs `fulfilled_qty = requested_qty`; `PARTIALLY_FULFILLED` needs some but not all;
+  `CLOSED` needs a reason.
+- Referrals: at most 3 per request, no two live (`PENDING`/`ACCEPTED`) referrals to the same shop, and
+  live referred quantity ≤ what is still unfulfilled (trigger, maps to `REFERRAL_LIMIT_REACHED` /
+  `REFERRAL_QTY_EXCEEDED`). `REJECTED` needs a reason; `ACCEPTED` needs `hold_until`.
+- `shop_id`, `patient_id`, `prescription_id`, `from_shop_id`, `to_shop_id` get their foreign keys in a
+  later 02x migration, once those tables are on main.
+
+State machines: `src/modules/requests/request.state.js` and `src/modules/referrals/referral.state.js`,
+one `{ from, to, actor, guard }` table each. Any other move throws `409 INVALID_TRANSITION`.
+
+### Commit plan (Anushka)
+
+| # | Due | Deliverable |
+| --- | --- | --- |
+| 1 | Tue Nov 4 | Migrations for stock_requests and referrals; request.state.js transition table ✅ |
+| 2 | Thu Nov 6 | Create request (snapshot, number, urgency, expiry), doctor list, shop inbox (C1–C3) |
+| 3 | Sat Nov 8 | Guards for every transition; acknowledge, close, cancel routes; state machine tests (C4, C5) |
+| 4 | Mon Nov 10 | Availability lookup with ranking; dispense against a request (C6) |
+| 5 | Wed Nov 12 | Referrals: create, accept with hold, reject, cancel (C7, C8) |
+| 6 | Fri Nov 14 | Pickup verification, patient SMS batching + slip, expiry jobs, 2-hour reminder (C9–C11) |
+| 7 | Sun Nov 16 | Referral flow integration test, edge cases 1, 2, 7, 8, 11, 12, 13, 16; merge to main |
+
 ## Commit plan (Izaz)
 
 | # | Due | Deliverable |

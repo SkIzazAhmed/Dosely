@@ -72,6 +72,18 @@ const ErrorCodes = Object.freeze({
   INSUFFICIENT_STOCK: { status: 409, message: 'Not enough non-expired stock' },
   STALE_INVENTORY: { status: 409, message: 'Inventory changed since you read it; reload and try again' },
   REASON_REQUIRED: { status: 400, message: 'A reason is required for this stock change' },
+
+  // Requests + referrals (Anushka, C1–C11, edge cases 1, 2, 7, 8, 11, 12, 13, 16)
+  INVALID_TRANSITION: { status: 409, message: 'This status change is not allowed' },
+  REQUEST_NOT_SHORT: { status: 409, message: 'Shop already has enough stock; no request needed' },
+  REQUEST_EXPIRED: { status: 409, message: 'Request has expired' },
+  CLOSE_REASON_REQUIRED: { status: 400, message: 'A reason is required to close a request' },
+  REFERRAL_LIMIT_REACHED: { status: 409, message: 'A request can have at most 3 referrals' },
+  REFERRAL_DUPLICATE: { status: 409, message: 'This shop already has a live referral for this request' },
+  REFERRAL_QTY_EXCEEDED: { status: 409, message: 'Referred quantity is more than what is still unfulfilled' },
+  REFERRAL_SAME_SHOP: { status: 400, message: 'Cannot refer a request to the same shop' },
+  REJECT_REASON_REQUIRED: { status: 400, message: 'A reason is required to reject a referral' },
+  REFERRAL_VERIFICATION_FAILED: { status: 403, message: 'Request number or phone digits do not match' },
 });
 
 class AppError extends Error {
@@ -133,9 +145,14 @@ function fromPgError(err, constraintMap = {}) {
         column: err.column || null,
       });
     case 'P0001': // raise_exception from our triggers, e.g. delete guard
-      return err.message.startsWith('DELETE_NOT_ALLOWED')
-        ? new AppError('DELETE_NOT_ALLOWED', undefined, { table: err.table || null })
-        : err;
+      if (err.message.startsWith('DELETE_NOT_ALLOWED')) {
+        return new AppError('DELETE_NOT_ALLOWED', undefined, { table: err.table || null });
+      }
+      // Triggers raise 'CODE: detail' (e.g. REFERRAL_LIMIT_REACHED from migration 020)
+      {
+        const prefix = err.message.split(':', 1)[0];
+        return ErrorCodes[prefix] ? new AppError(prefix) : err;
+      }
     default:
       return err;
   }
