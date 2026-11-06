@@ -24,4 +24,12 @@ module.exports = Object.freeze({
   ]),
   BaseUnit: freeze(['TABLET', 'CAPSULE', 'ML', 'G', 'VIAL', 'AMPOULE', 'SACHET', 'TUBE', 'BOTTLE', 'UNIT']),
   StockMovementType: freeze(['STOCK_IN', 'DISPENSE', 'RETURN', 'ADJUSTMENT', 'EXPIRY_WRITE_OFF']),
+
+  // Requests + referrals (migration 020)
+  RequestUrgency: freeze(['ROUTINE', 'URGENT']),
+  RequestStatus: freeze([
+    'SENT', 'ACKNOWLEDGED', 'PARTIALLY_FULFILLED', 'REFERRED',
+    'FULFILLED', 'CLOSED', 'CANCELLED', 'EXPIRED',
+  ]),
+  ReferralStatus: freeze(['PENDING', 'ACCEPTED', 'REJECTED', 'CANCELLED', 'FULFILLED', 'NO_SHOW']),
 });
