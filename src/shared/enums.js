@@ -16,4 +16,12 @@ module.exports = Object.freeze({
   NotificationChannel: freeze(['IN_APP', 'SMS', 'EMAIL']),
   NotificationStatus: freeze(['PENDING', 'SENT', 'FAILED', 'SKIPPED']),
   NotificationRecipientType: freeze(['USER', 'PATIENT', 'SHOP']),
+
+  // Catalog + stock (migration 010)
+  DosageForm: freeze([
+    'TABLET', 'CAPSULE', 'SYRUP', 'SUSPENSION', 'INJECTION', 'OINTMENT', 'CREAM',
+    'GEL', 'DROPS', 'INHALER', 'POWDER', 'SACHET', 'LOTION', 'SPRAY', 'OTHER',
+  ]),
+  BaseUnit: freeze(['TABLET', 'CAPSULE', 'ML', 'G', 'VIAL', 'AMPOULE', 'SACHET', 'TUBE', 'BOTTLE', 'UNIT']),
+  StockMovementType: freeze(['STOCK_IN', 'DISPENSE', 'RETURN', 'ADJUSTMENT', 'EXPIRY_WRITE_OFF']),
 });

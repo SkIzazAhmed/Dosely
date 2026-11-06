@@ -172,6 +172,69 @@ Also: `notifyUser(userId, payload, opts)`, `notify({ recipientType, recipientId,
 `listInbox(userId, { unreadOnly, limit, before })`, `markRead(notificationId, userId)`.
 Patients have no login, so `IN_APP` to a patient is a validation error.
 
+## Catalog and stock (Rachana)
+
+Tables so far (migration `010`, numbers 010–019 claimed for catalog + stock): `generics`,
+`medicines`, `medicine_batches`, plus enums `dosage_form`, `base_unit`, `stock_movement_type`.
+`inventory`, `stock_movements` and `stock_thresholds` land Nov 8.
+
+- Generic names are unique ignoring case. Medicines are unique on brand + manufacturer + form + strength;
+  `prescription_required` defaults to true.
+- Batch number is unique per medicine; `mrp` is INR per base unit (> 0); manufacture date must be before expiry.
+- A medicine with no batches can be hard-deleted; once it has one, the delete maps to `409 MEDICINE_IN_USE`
+  (deactivate it instead). Batches and generics are never hard-deleted.
+
+### stock.service contract (agree Nov 4)
+
+`src/modules/inventory/stock.service.js` is the **only** code that changes stock. Today it is a stub that
+validates input like the real service and keeps stock in memory, so FEFO, `INSUFFICIENT_STOCK`,
+`BATCH_EXPIRED`, `BATCH_MISMATCH`, `STALE_INVENTORY` and idempotent replays already behave realistically.
+Real versions replace it with the same signatures: `stockIn` Nov 8, `dispense`/`adjust`/`writeOff` Nov 10,
+`reserve`/`release`/`getAvailable` Nov 12. Every function takes `opts = { client }` last to join your
+transaction. Full JSDoc is in the file.
+
+```js
+const stock = require('../inventory/stock.service');
+
+// Anushka — lookup: which shops have it? (non-expired, unreserved units)
+const shops = await stock.getAvailable(medicineId, { shopIds });   // [{ shopId, medicineId, available, nearestExpiry }]
+
+// referral accepted → hold the units; keep `lines` on the referral
+const { lines } = await stock.reserve({ shopId, medicineId, quantity, referralId, performedBy: req.user.id }, { client });
+
+// patient picks up → dispense exactly the reserved units
+await stock.dispense({ shopId, medicineId, quantity, referralId, reservation: lines,
+                       performedBy: req.user.id, idempotencyKey }, { client });
+
+// referral rejected / expired → give the units back
+await stock.release({ shopId, referralId, lines, performedBy: req.user.id }, { client });
+
+// walk-in dispense (FEFO across batches); idempotencyKey is required
+await stock.dispense({ shopId, medicineId, quantity, requestId, performedBy, idempotencyKey });
+```
+
+| Function | Errors |
+| --- | --- |
+| `stockIn({ shopId, medicineId, batchNo, expiryDate, manufactureDate?, mrp, quantity, performedBy, reason?, idempotencyKey? })` | 422 `BATCH_EXPIRED`, 409 `BATCH_MISMATCH` |
+| `dispense({ shopId, medicineId, quantity, performedBy, idempotencyKey, requestId?, referralId?, reservation? })` | 409 `INSUFFICIENT_STOCK` |
+| `adjust({ shopId, batchId, delta, expectedVersion, reason, performedBy })` — OWNER | 409 `STALE_INVENTORY`, 400 `REASON_REQUIRED` |
+| `writeOff({ shopId, batchId, quantity?, expectedVersion?, reason, performedBy })` — OWNER | 409 `STALE_INVENTORY`, 409 `INSUFFICIENT_STOCK` |
+| `reserve({ shopId, medicineId, quantity, referralId, performedBy })` → `{ lines }` | 409 `INSUFFICIENT_STOCK` |
+| `release({ shopId, referralId, lines, performedBy })` → `{ released }` | — |
+| `getAvailable(medicineId, { shopIds? })` | — |
+
+### Commit plan (Rachana)
+
+| # | Due | Deliverable |
+| --- | --- | --- |
+| 1 | Tue Nov 4 | Migrations for generics, medicines, batches; stock.service stub with agreed signatures ✅ |
+| 2 | Thu Nov 6 | Catalog services and routes: search, create, edit, deactivate, MEDICINE_IN_USE (B1–B3) |
+| 3 | Sat Nov 8 | Inventory + stock_movements (grants revoked); real stockIn (B4, B5, B7) |
+| 4 | Mon Nov 10 | Real dispense: FEFO, atomic update, batch-order locks, idempotency (B8); adjust, writeOff (B9) |
+| 5 | Wed Nov 12 | reserve/release, STALE_INVENTORY, availability helper (B10), inventory list route |
+| 6 | Fri Nov 14 | Thresholds (B11), expiryScan + lowStockScan jobs, post-dispense low-stock check (B12), seed stock |
+| 7 | Sun Nov 16 | FEFO + concurrent dispense tests, edge cases 3, 5, 6, 14, 15; merge to main |
+
 ## Commit plan (Izaz)
 
 | # | Due | Deliverable |

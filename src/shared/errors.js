@@ -58,6 +58,20 @@ const ErrorCodes = Object.freeze({
   NOTIFICATION_DUPLICATE: { status: 409, message: 'Notification with this dedupe key already exists' },
   SMS_TOO_LONG: { status: 400, message: 'SMS body exceeds 160 characters' },
   NOTIFICATION_CHANNEL_UNAVAILABLE: { status: 409, message: 'No usable destination for this channel' },
+
+  // Catalog (Rachana, B1–B3, edge case 5)
+  GENERIC_NAME_TAKEN: { status: 409, message: 'A generic with this name already exists' },
+  MEDICINE_DUPLICATE: { status: 409, message: 'A medicine with this brand, manufacturer, form and strength already exists' },
+  MEDICINE_IN_USE: { status: 409, message: 'Medicine has batches and cannot be deleted; deactivate it instead' },
+  MEDICINE_INACTIVE: { status: 409, message: 'Medicine is deactivated' },
+  BATCH_NO_TAKEN: { status: 409, message: 'Batch number already exists for this medicine' },
+
+  // Stock (Rachana, B4–B10, edge cases 3, 6, 15)
+  BATCH_EXPIRED: { status: 422, message: 'Batch is expired' },
+  BATCH_MISMATCH: { status: 409, message: 'Batch number is already known with a different expiry date or MRP' },
+  INSUFFICIENT_STOCK: { status: 409, message: 'Not enough non-expired stock' },
+  STALE_INVENTORY: { status: 409, message: 'Inventory changed since you read it; reload and try again' },
+  REASON_REQUIRED: { status: 400, message: 'A reason is required for this stock change' },
 });
 
 class AppError extends Error {
