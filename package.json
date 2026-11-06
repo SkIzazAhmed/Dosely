@@ -1,0 +1,24 @@
+{
+  "name": "dosely",
+  "version": "0.1.0",
+  "description": "Dosely — ApDe Project pharmacy module MVP (Express + PostgreSQL)",
+  "main": "src/server.js",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "migrate": "node src/db/migrate.js up",
+    "migrate:status": "node src/db/migrate.js status",
+    "seed": "node src/db/seed.js",
+    "db:setup": "npm run migrate && npm run seed",
+    "test": "node --test --test-concurrency=1 \"test/**/*.test.js\""
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "pg": "^8.13.1"
+  }
+}
