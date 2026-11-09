@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Migration 020: STOCK_REQUESTS and REFERRALS checks (C1, C2, C7, C8).
+ * Migrations 020, 021: STOCK_REQUESTS and REFERRALS checks (C1, C2, C7, C8) and foreign keys.
  * Needs PostgreSQL in DATABASE_URL; skipped when it isn't reachable.
  * Every test runs in a transaction that is rolled back.
  */
@@ -48,14 +48,21 @@ async function fails(client, sql, params) {
   throw new Error(`expected failure: ${sql}`);
 }
 
-// Shop ids are plain numbers until the shops FK lands (Nov 8).
-const SHOP_A = 1;
-const SHOP_B = 2;
-const SHOP_C = 3;
-const SHOP_D = 4;
-const SHOP_E = 5;
+// Five fresh shops per test (created inside the rolled-back transaction).
+let SHOP_A, SHOP_B, SHOP_C, SHOP_D, SHOP_E;
 
 async function fixtures(c) {
+  const shops = [];
+  for (let i = 0; i < 5; i++) {
+    const code = `DB-${Date.now().toString(36).toUpperCase()}${i}${Math.floor(Math.random() * 1e4)}`;
+    const { rows: [s] } = await c.query(
+      `INSERT INTO shops (name, code, drug_licence_no, address, area, pincode)
+       VALUES ($1, $2, $3, '1 Test Road', 'Jayanagar', '560041') RETURNING id`,
+      [`Shop ${code}`, code, `DL-${code}`]
+    );
+    shops.push(s.id);
+  }
+  [SHOP_A, SHOP_B, SHOP_C, SHOP_D, SHOP_E] = shops;
   const u = await c.query(
     `INSERT INTO users (role, full_name, password_hash) VALUES ('DOCTOR', 'Dr Test', 'x') RETURNING id`
   );
@@ -252,5 +259,24 @@ test('C7/C8: referral checks — shops differ, seen qty, reject reason, accept h
        WHERE id = $1`,
       [ref.id]
     );
+  });
+});
+
+test('021: shop and patient ids must exist', async (t) => {
+  if (!dbUp) return t.skip('no database');
+  await scratch(async (c) => {
+    const f = await fixtures(c);
+    const r = await insertRequest(c, f);
+    const badShop = await fails(c, `UPDATE stock_requests SET shop_id = 999999999 WHERE id = $1`, [r.id]);
+    assert.equal(badShop.constraint, 'stock_requests_shop_id_fkey');
+    const badPatient = await fails(c, `UPDATE stock_requests SET patient_id = 999999999 WHERE id = $1`, [r.id]);
+    assert.equal(badPatient.constraint, 'stock_requests_patient_id_fkey');
+    const badTarget = await fails(
+      c,
+      `INSERT INTO referrals (request_id, from_shop_id, to_shop_id, quantity, available_qty_seen, referred_by)
+       VALUES ($1, $2, 999999999, 1, 1, $3)`,
+      [r.id, SHOP_A, f.staffId]
+    );
+    assert.equal(badTarget.constraint, 'referrals_to_shop_id_fkey');
   });
 });

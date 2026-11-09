@@ -9,6 +9,7 @@ const userRoutes = require('./modules/users/users.routes');
 const doctorRoutes = require('./modules/doctors/doctors.routes');
 const shopRoutes = require('./modules/shops/shops.routes');
 const patientRoutes = require('./modules/patients/patients.routes');
+const requestRoutes = require('./modules/requests/request.routes');
 
 function createApp() {
   const app = express();
@@ -34,6 +35,7 @@ function createApp() {
   app.use('/doctors', doctorRoutes);
   app.use('/shops', shopRoutes);
   app.use('/patients', patientRoutes);
+  app.use('/requests', requestRoutes);
 
   // Module routers still to land:
   //   Commit 4 (Nov 10): /{users,patients,shops}/:id/phones, /phones/:id/verify

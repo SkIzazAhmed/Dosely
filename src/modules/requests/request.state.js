@@ -12,9 +12,8 @@
  *   TARGET_SHOP  staff of a shop the request was referred to
  *   SYSTEM       background jobs (expireRequests, expireReferralHolds)
  *
- * Guards are named here and looked up in GUARDS. Commit 1 (Nov 4) is the
- * skeleton: every guard passes. Commit 3 (Nov 8) fills them in with the
- * real checks and unit tests.
+ * Guards are named here and looked up in GUARDS; a failing guard is also
+ * 409 INVALID_TRANSITION, with the guard's reason in error.details.reason.
  *
  *   SENT ──ack──▶ ACKNOWLEDGED ──dispense──▶ PARTIALLY_FULFILLED ──dispense──▶ FULFILLED
  *     │               │   │                        │   ▲
@@ -65,25 +64,51 @@ const TRANSITIONS = Object.freeze(
 );
 
 /**
- * Guard implementations. Each takes a context and returns null when the move
- * is allowed, or a short reason string when it isn't.
- * Skeleton (Commit 1): all pass. Real checks land in Commit 3.
+ * Guards (Commit 3). Each takes a context and returns null when the move is
+ * allowed, or a short reason when it isn't (sent back in error.details.reason).
  *
  * @typedef {Object} GuardContext
- * @property {Object} request        stock_requests row
- * @property {Date}   [now]
- * @property {number} [liveReferrals] count of PENDING + ACCEPTED referrals
- * @property {string} [reason]
+ * @property {Object} request         public request (request.model toPublic)
+ * @property {Date}   [now]           defaults to new Date()
+ * @property {number} [fulfilledQty]  fulfilled quantity AFTER the move (dispense);
+ *                                    defaults to request.fulfilledQty
+ * @property {number} [liveReferrals] PENDING + ACCEPTED referrals AFTER the move
+ * @property {string} [reason]        close reason
  */
+const expiresAt = (ctx) => new Date(ctx.request.expiresAt).getTime();
+const nowMs = (ctx) => (ctx.now ? new Date(ctx.now).getTime() : Date.now());
+const fulfilled = (ctx) => (ctx.fulfilledQty !== undefined ? ctx.fulfilledQty : ctx.request.fulfilledQty);
+const live = (ctx) => ctx.liveReferrals;
+
+function needs(ctx, ...fields) {
+  if (!ctx || !ctx.request) return 'missing request';
+  for (const f of fields) if (ctx[f] === undefined) return `missing ${f}`;
+  return null;
+}
+
 const GUARDS = Object.freeze({
-  notExpired: () => null,
-  pastExpiry: () => null,
-  partlyFulfilled: () => null,
-  fullyFulfilled: () => null,
-  hasLiveReferral: () => null,
-  noLiveReferralSomeGiven: () => null,
-  noLiveReferralNoneGiven: () => null,
-  hasReason: () => null,
+  notExpired: (ctx) => needs(ctx) || (nowMs(ctx) < expiresAt(ctx) ? null : 'request has expired'),
+  pastExpiry: (ctx) => needs(ctx) || (nowMs(ctx) >= expiresAt(ctx) ? null : 'request has not expired yet'),
+  partlyFulfilled: (ctx) => {
+    const miss = needs(ctx);
+    if (miss) return miss;
+    const n = fulfilled(ctx);
+    return n > 0 && n < ctx.request.requestedQty ? null : 'fulfilled quantity must be more than 0 and less than requested';
+  },
+  fullyFulfilled: (ctx) =>
+    needs(ctx) || (fulfilled(ctx) === ctx.request.requestedQty ? null : 'fulfilled quantity must equal requested quantity'),
+  hasLiveReferral: (ctx) => needs(ctx, 'liveReferrals') || (live(ctx) > 0 ? null : 'request has no live referral'),
+  noLiveReferralSomeGiven: (ctx) =>
+    needs(ctx, 'liveReferrals') ||
+    (live(ctx) > 0 ? 'request still has a live referral' : fulfilled(ctx) > 0 ? null : 'nothing has been dispensed yet'),
+  noLiveReferralNoneGiven: (ctx) =>
+    needs(ctx, 'liveReferrals') ||
+    (live(ctx) > 0 ? 'request still has a live referral' : fulfilled(ctx) === 0 ? null : 'some quantity was already dispensed'),
+  hasReason: (ctx) => {
+    const r = ctx && typeof ctx.reason === 'string' ? ctx.reason.trim() : '';
+    if (!r) return 'a reason is required';
+    return r.length <= 500 ? null : 'reason must be at most 500 characters';
+  },
 });
 
 function findTransition(from, to) {
