@@ -7,6 +7,7 @@ const { errorHandler, notFound } = require('./middleware/errorHandler');
 const authRoutes = require('./modules/auth/auth.routes');
 const userRoutes = require('./modules/users/users.routes');
 const doctorRoutes = require('./modules/doctors/doctors.routes');
+const requestRoutes = require('./modules/requests/request.routes');
 
 function createApp() {
   const app = express();
@@ -30,6 +31,7 @@ function createApp() {
   app.use('/auth', authRoutes);
   app.use('/users', userRoutes);
   app.use('/doctors', doctorRoutes);
+  app.use('/requests', requestRoutes);
 
   // Module routers still to land:
   //   Commit 3 (Nov 8):  /shops, /shops/:id/staff, /patients

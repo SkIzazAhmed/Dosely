@@ -254,12 +254,27 @@ Migration `020` (numbers 020–029 claimed for requests + referrals): `stock_req
 State machines: `src/modules/requests/request.state.js` and `src/modules/referrals/referral.state.js`,
 one `{ from, to, actor, guard }` table each. Any other move throws `409 INVALID_TRANSITION`.
 
+### Requests API
+
+| Method & path | Who | What |
+| --- | --- | --- |
+| POST /requests | DOCTOR with registration no. | `{ shopId, medicineId, quantity, urgency?, doctorNote?, patientId?, prescriptionId? }` → 201. Only when `quantity` > the shop's available stock, else `409 REQUEST_NOT_SHORT` |
+| GET /requests?mine | DOCTOR | own requests, newest first |
+| GET /requests?shopId= | shop staff, ADMIN | shop inbox, open statuses first |
+| GET /requests/:id | sender, shop staff, ADMIN | one request |
+
+Lists take `&status=&limit=&offset=` and return `{ items: [{ prescriptionId, requests: [...] }], total, limit, offset }`:
+requests sharing a prescription come back as one group. `ROUTINE` requests expire after 24 h, `URGENT` after 2 h.
+
+Until Izaz's `shops` / `shop_staff` tables land, `src/modules/requests/shopAccess.js` runs as a stub
+(any shop id is active, any SHOPKEEPER is staff of every shop) and switches to the real checks by itself.
+
 ### Commit plan (Anushka)
 
 | # | Due | Deliverable |
 | --- | --- | --- |
 | 1 | Tue Nov 4 | Migrations for stock_requests and referrals; request.state.js transition table ✅ |
-| 2 | Thu Nov 6 | Create request (snapshot, number, urgency, expiry), doctor list, shop inbox (C1–C3) |
+| 2 | Thu Nov 6 | Create request (snapshot, number, urgency, expiry), doctor list, shop inbox (C1–C3) ✅ |
 | 3 | Sat Nov 8 | Guards for every transition; acknowledge, close, cancel routes; state machine tests (C4, C5) |
 | 4 | Mon Nov 10 | Availability lookup with ranking; dispense against a request (C6) |
 | 5 | Wed Nov 12 | Referrals: create, accept with hold, reject, cancel (C7, C8) |
