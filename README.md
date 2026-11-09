@@ -262,9 +262,15 @@ one `{ from, to, actor, guard }` table each. Any other move throws `409 INVALID_
 | GET /requests?mine | DOCTOR | own requests, newest first |
 | GET /requests?shopId= | shop staff, ADMIN | shop inbox, open statuses first |
 | GET /requests/:id | sender, shop staff, ADMIN | one request |
+| POST /requests/:id/acknowledge | shop staff, ADMIN | only from `SENT`, before expiry |
+| POST /requests/:id/close | shop staff, ADMIN | `{ reason }` (1–500 chars, else `400 CLOSE_REASON_REQUIRED`); from `ACKNOWLEDGED` or `PARTIALLY_FULFILLED` |
+| POST /requests/:id/cancel | sending doctor, ADMIN | `{ reason? }`; cancels live referrals and releases held stock |
 
 Lists take `&status=&limit=&offset=` and return `{ items: [{ prescriptionId, requests: [...] }], total, limit, offset }`:
 requests sharing a prescription come back as one group. `ROUTINE` requests expire after 24 h, `URGENT` after 2 h.
+Any status change the state machine doesn't allow (wrong status, or a failing guard such as "request has
+expired") is `409 INVALID_TRANSITION` with `details: { from, to, actor, reason }`. Acknowledge is a
+conditional update, so it can't race the expiry job. The action routes accept an optional `Idempotency-Key`.
 
 Until Izaz's `shops` / `shop_staff` tables land, `src/modules/requests/shopAccess.js` runs as a stub
 (any shop id is active, any SHOPKEEPER is staff of every shop) and switches to the real checks by itself.
@@ -275,7 +281,7 @@ Until Izaz's `shops` / `shop_staff` tables land, `src/modules/requests/shopAcces
 | --- | --- | --- |
 | 1 | Tue Nov 4 | Migrations for stock_requests and referrals; request.state.js transition table ✅ |
 | 2 | Thu Nov 6 | Create request (snapshot, number, urgency, expiry), doctor list, shop inbox (C1–C3) ✅ |
-| 3 | Sat Nov 8 | Guards for every transition; acknowledge, close, cancel routes; state machine tests (C4, C5) |
+| 3 | Sat Nov 8 | Guards for every transition; acknowledge, close, cancel routes; state machine tests (C4, C5) ✅ |
 | 4 | Mon Nov 10 | Availability lookup with ranking; dispense against a request (C6) |
 | 5 | Wed Nov 12 | Referrals: create, accept with hold, reject, cancel (C7, C8) |
 | 6 | Fri Nov 14 | Pickup verification, patient SMS batching + slip, expiry jobs, 2-hour reminder (C9–C11) |

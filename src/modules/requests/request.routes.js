@@ -67,4 +67,37 @@ router.get(
   })
 );
 
+// POST /requests/:id/acknowledge — shop staff (C5); only from SENT, before expiry
+router.post(
+  '/:id/acknowledge',
+  idempotency({ required: false }),
+  asyncHandler(async (req, res) => {
+    res.json(await requests.acknowledge(req.user, idParam(req.params.id, 'Request')));
+  })
+);
+
+// POST /requests/:id/close { reason } — shop staff (C5)
+router.post(
+  '/:id/close',
+  idempotency({ required: false }),
+  asyncHandler(async (req, res) => {
+    const reqId = idParam(req.params.id, 'Request');
+    const reason = req.body && typeof req.body.reason === 'string' ? req.body.reason.trim() : '';
+    if (!reason) throw new AppError('CLOSE_REASON_REQUIRED');
+    const body = validate(req.body, { reason: { type: 'string', max: 500, required: true } });
+    res.json(await requests.close(req.user, reqId, body.reason));
+  })
+);
+
+// POST /requests/:id/cancel { reason? } — the doctor who sent it (C5); releases holds
+router.post(
+  '/:id/cancel',
+  idempotency({ required: false }),
+  asyncHandler(async (req, res) => {
+    const reqId = idParam(req.params.id, 'Request');
+    const body = validate(req.body, { reason: { type: 'string', max: 500, nullable: true } });
+    res.json(await requests.cancel(req.user, reqId, body.reason ?? null));
+  })
+);
+
 module.exports = router;

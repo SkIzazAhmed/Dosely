@@ -197,3 +197,127 @@ t('C3: inbox needs shopId; doctors cannot read the inbox or other doctors’ req
   const admin = await api('GET', `/requests/${r.body.id}`, { token: tok.admin });
   assert.equal(admin.status, 200);
 });
+
+// ---------------------------------------------------------------------------
+// Commit 3: acknowledge, close, cancel (C4, C5, edge cases 11, 16)
+// ---------------------------------------------------------------------------
+
+const act = (id, action, token, body) => api('POST', `/requests/${id}/${action}`, { token, body, key: crypto.randomUUID() });
+
+t('C5: shop acknowledges a SENT request once; a second acknowledge is 409', async () => {
+  const r = await send({ quantity: 9 });
+  const ack = await act(r.body.id, 'acknowledge', tok.shop);
+  assert.equal(ack.status, 200, JSON.stringify(ack.body));
+  assert.equal(ack.body.status, 'ACKNOWLEDGED');
+  assert.ok(ack.body.acknowledgedAt);
+  const again = await act(r.body.id, 'acknowledge', tok.shop);
+  assert.equal(again.status, 409);
+  assert.equal(again.body.error.code, 'INVALID_TRANSITION');
+  assert.equal(again.body.error.details.from, 'ACKNOWLEDGED');
+});
+
+t('C5: only the shop acknowledges/closes and only the sending doctor cancels', async () => {
+  const r = await send({ quantity: 9 });
+  assert.equal((await act(r.body.id, 'acknowledge', tok.doctor)).status, 403);
+  assert.equal((await act(r.body.id, 'close', tok.doctor, { reason: 'x' })).status, 403);
+  assert.equal((await act(r.body.id, 'cancel', tok.shop)).status, 403);
+  assert.equal((await act(r.body.id, 'cancel', tok.noreg)).status, 403);
+});
+
+t('edge case 16: acknowledge after expiry, or after the expiry job ran, is 409', async () => {
+  const r = await send({ urgency: 'URGENT' });
+  await pool.query(
+    `UPDATE stock_requests SET created_at = now() - interval '3 hours', expires_at = now() - interval '1 minute' WHERE id = $1`,
+    [r.body.id]
+  );
+  const late = await act(r.body.id, 'acknowledge', tok.shop);
+  assert.equal(late.status, 409);
+  assert.equal(late.body.error.code, 'INVALID_TRANSITION');
+  assert.match(late.body.error.details.reason, /expired/);
+
+  await pool.query(`UPDATE stock_requests SET status = 'EXPIRED', expired_at = now() WHERE id = $1`, [r.body.id]);
+  const gone = await act(r.body.id, 'acknowledge', tok.shop);
+  assert.equal(gone.status, 409);
+  assert.equal(gone.body.error.details.from, 'EXPIRED');
+});
+
+t('edge case 16: two acknowledges racing — exactly one wins', async () => {
+  const r = await send({ quantity: 9 });
+  const results = await Promise.all([1, 2, 3].map(() => act(r.body.id, 'acknowledge', tok.shop)));
+  assert.deepEqual(results.map((x) => x.status).sort(), [200, 409, 409]);
+});
+
+t('C5: close needs a reason and works from ACKNOWLEDGED, not from SENT or a terminal status', async () => {
+  const r = await send({ quantity: 9 });
+  const fromSent = await act(r.body.id, 'close', tok.shop, { reason: 'Supplier delay' });
+  assert.equal(fromSent.status, 409);
+  await act(r.body.id, 'acknowledge', tok.shop);
+
+  const noReason = await act(r.body.id, 'close', tok.shop, {});
+  assert.equal(noReason.status, 400);
+  assert.equal(noReason.body.error.code, 'CLOSE_REASON_REQUIRED');
+  const blank = await act(r.body.id, 'close', tok.shop, { reason: '   ' });
+  assert.equal(blank.body.error.code, 'CLOSE_REASON_REQUIRED');
+  const long = await act(r.body.id, 'close', tok.shop, { reason: 'x'.repeat(501) });
+  assert.equal(long.status, 400);
+
+  const ok = await act(r.body.id, 'close', tok.shop, { reason: 'Supplier delay' });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.status, 'CLOSED');
+  assert.equal(ok.body.closeReason, 'Supplier delay');
+
+  const cancel = await act(r.body.id, 'cancel', tok.doctor);
+  assert.equal(cancel.status, 409);
+  assert.equal(cancel.body.error.code, 'INVALID_TRANSITION');
+});
+
+t('C5: doctor cancels from SENT and from ACKNOWLEDGED', async () => {
+  const a = await send({ quantity: 9 });
+  const c1 = await act(a.body.id, 'cancel', tok.doctor, { reason: 'Patient found it elsewhere' });
+  assert.equal(c1.status, 200);
+  assert.equal(c1.body.status, 'CANCELLED');
+  assert.equal(c1.body.cancelReason, 'Patient found it elsewhere');
+  assert.deepEqual(c1.body.cancelledReferrals, []);
+
+  const b = await send({ quantity: 9 });
+  await act(b.body.id, 'acknowledge', tok.shop);
+  const c2 = await act(b.body.id, 'cancel', tok.doctor);
+  assert.equal(c2.status, 200);
+  assert.equal(c2.body.status, 'CANCELLED');
+});
+
+t('edge case 11: cancel after a referral was accepted releases the held stock', async () => {
+  const target = ctx.shopId + 2;
+  await putStock(target, ctx.medicineId, 5);
+  const before = await stock.getAvailable(ctx.medicineId, { shopIds: [target] });
+  assert.equal(before[0].available, 5);
+
+  const r = await send({ quantity: 9 });
+  await act(r.body.id, 'acknowledge', tok.shop);
+  const { rows: [{ id: staffId }] } = await pool.query(`SELECT id FROM users WHERE email = 'shopkeeper@dosely.dev'`);
+  const { rows: [refRow] } = await pool.query(
+    `INSERT INTO referrals (request_id, from_shop_id, to_shop_id, quantity, available_qty_seen, referred_by)
+     VALUES ($1, $2, $3, 5, 5, $4) RETURNING id`,
+    [r.body.id, ctx.shopId, target, staffId]
+  );
+  const { lines } = await stock.reserve({
+    shopId: target, medicineId: ctx.medicineId, quantity: 5, referralId: refRow.id, performedBy: staffId,
+  });
+  await pool.query(
+    `UPDATE referrals SET status = 'ACCEPTED', accepted_at = now(), hold_until = now() + interval '24 hours',
+            reservation_lines = $2 WHERE id = $1`,
+    [refRow.id, JSON.stringify(lines)]
+  );
+  await pool.query(`UPDATE stock_requests SET status = 'REFERRED' WHERE id = $1`, [r.body.id]);
+  assert.equal((await stock.getAvailable(ctx.medicineId, { shopIds: [target] })).length, 0);
+
+  const c = await act(r.body.id, 'cancel', tok.doctor);
+  assert.equal(c.status, 200, JSON.stringify(c.body));
+  assert.equal(c.body.status, 'CANCELLED');
+  assert.deepEqual(c.body.cancelledReferrals, [refRow.id]);
+  assert.deepEqual(c.body.released, [{ referralId: refRow.id, shopId: target, released: 5 }]);
+
+  const { rows: [after] } = await pool.query('SELECT status, cancel_reason FROM referrals WHERE id = $1', [refRow.id]);
+  assert.equal(after.status, 'CANCELLED');
+  assert.equal((await stock.getAvailable(ctx.medicineId, { shopIds: [target] }))[0].available, 5);
+});

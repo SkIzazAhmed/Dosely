@@ -11,7 +11,7 @@
  *      ├──reject (reason)──▶ REJECTED          ├──hold expired──▶ NO_SHOW (release stock)
  *      └──cancel──▶ CANCELLED ◀────────────────┘ cancel (release stock)
  *
- * Skeleton (Commit 1): guards are named and all pass; real checks in Commit 3/5.
+ * A failing guard is also 409 INVALID_TRANSITION, with the reason in error.details.reason.
  */
 
 const { AppError } = require('../../shared/errors');
@@ -31,11 +31,34 @@ const TRANSITIONS = Object.freeze(
   ].map((t) => Object.freeze({ ...t, actor: Object.freeze(t.actor) }))
 );
 
+/**
+ * Guards. ctx: { referral (row or public), now?, available?, reason?, verified? }
+ *   stockAvailable  target shop's available qty (ctx.available) covers the referral
+ *   hasReason       reject reason, 1–500 characters
+ *   pickupVerified  request number + last 5 phone digits matched (ctx.verified === true, C9)
+ *   holdExpired     now >= hold_until (expireReferralHolds job, C11)
+ */
+const val = (ref, camel, snake) => (ref[camel] !== undefined ? ref[camel] : ref[snake]);
+
 const GUARDS = Object.freeze({
-  stockAvailable: () => null,
-  hasReason: () => null,
-  pickupVerified: () => null,
-  holdExpired: () => null,
+  stockAvailable: (ctx) => {
+    if (!ctx || !ctx.referral) return 'missing referral';
+    if (ctx.available === undefined) return 'missing available';
+    return ctx.available >= ctx.referral.quantity ? null : 'target shop does not have enough stock';
+  },
+  hasReason: (ctx) => {
+    const r = ctx && typeof ctx.reason === 'string' ? ctx.reason.trim() : '';
+    if (!r) return 'a reason is required';
+    return r.length <= 500 ? null : 'reason must be at most 500 characters';
+  },
+  pickupVerified: (ctx) => (ctx && ctx.verified === true ? null : 'pickup is not verified'),
+  holdExpired: (ctx) => {
+    if (!ctx || !ctx.referral) return 'missing referral';
+    const hold = val(ctx.referral, 'holdUntil', 'hold_until');
+    if (!hold) return 'referral has no hold';
+    const now = ctx.now ? new Date(ctx.now).getTime() : Date.now();
+    return now >= new Date(hold).getTime() ? null : 'hold has not expired yet';
+  },
 });
 
 function findTransition(from, to) {

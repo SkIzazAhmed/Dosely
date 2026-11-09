@@ -11,6 +11,8 @@ const { AppError, fromPgError } = require('../../shared/errors');
 const doctors = require('../doctors/doctors.service');
 const stock = require('../inventory/stock.service');
 const shopAccess = require('./shopAccess');
+const state = require('./request.state');
+const referralState = require('../referrals/referral.state');
 const { URGENCY_HOURS, SELECT, STATUS_ORDER, toPublic, groupByPrescription } = require('./request.model');
 
 async function getById(id, { client, forUpdate = false } = {}) {
@@ -130,7 +132,124 @@ async function getForUser(user, id) {
   return request;
 }
 
+
+// ---------------------------------------------------------------------------
+// Status changes (C4, C5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the caller to the actor a move needs. ADMIN may act for the shop or
+ * the doctor; everyone else must be the real thing (actorFor throws otherwise).
+ */
+async function actAs(user, request, needed, { client } = {}) {
+  const actor = await actorFor(user, request, { client });
+  if (actor === 'ADMIN') return needed;
+  if (actor !== needed) {
+    throw new AppError('FORBIDDEN', needed === 'DOCTOR' ? 'Only the doctor who sent the request can do this' : 'Only staff of the request’s shop can do this');
+  }
+  return actor;
+}
+
+async function liveReferralCount(requestId, { client } = {}) {
+  const { rows: [{ n }] } = await query(
+    `SELECT count(*)::int AS n FROM referrals WHERE request_id = $1 AND status IN ('PENDING', 'ACCEPTED')`,
+    [requestId],
+    client
+  );
+  return n;
+}
+
+/**
+ * C5: acknowledge — only from SENT and before expiry. The UPDATE is conditional
+ * on status = 'SENT' AND expires_at > now(), so it can't race the
+ * expireRequests job (edge case 16): whichever commits first wins, the other
+ * gets 409 INVALID_TRANSITION.
+ */
+async function acknowledge(user, id) {
+  const request = await getByIdOrThrow(id);
+  const actor = await actAs(user, request, 'SHOP');
+  state.assertTransition(request.status, 'ACKNOWLEDGED', actor, { request });
+
+  const { rowCount } = await query(
+    `UPDATE stock_requests
+        SET status = 'ACKNOWLEDGED', acknowledged_at = now(), acknowledged_by = $2
+      WHERE id = $1 AND status = 'SENT' AND expires_at > now()`,
+    [id, user.id]
+  );
+  if (rowCount === 0) {
+    // lost the race (expired or acknowledged meanwhile): report against the current row
+    const now = await getByIdOrThrow(id);
+    state.assertTransition(now.status, 'ACKNOWLEDGED', actor, { request: now });
+    throw new AppError('INVALID_TRANSITION', `Cannot move request from ${now.status} to ACKNOWLEDGED`, {
+      entity: 'stock_request', from: now.status, to: 'ACKNOWLEDGED', actor, reason: 'request has expired',
+    });
+  }
+  return getById(id);
+}
+
+/** C5: the shop closes an open request with a reason. */
+async function close(user, id, reason) {
+  return withTransaction(async (client) => {
+    const request = await getByIdOrThrow(id, { client, forUpdate: true });
+    const actor = await actAs(user, request, 'SHOP', { client });
+    state.assertTransition(request.status, 'CLOSED', actor, {
+      request, reason, liveReferrals: await liveReferralCount(id, { client }),
+    });
+    await client.query(
+      `UPDATE stock_requests
+          SET status = 'CLOSED', closed_at = now(), closed_by = $2, close_reason = $3
+        WHERE id = $1`,
+      [id, user.id, reason.trim()]
+    );
+    return getById(id, { client });
+  });
+}
+
+/**
+ * C5 / edge case 11: the doctor cancels. Every live referral is cancelled too,
+ * and stock held for an ACCEPTED referral is released at the target shop.
+ */
+async function cancel(user, id, reason = null) {
+  return withTransaction(async (client) => {
+    const request = await getByIdOrThrow(id, { client, forUpdate: true });
+    const actor = await actAs(user, request, 'DOCTOR', { client });
+    state.assertTransition(request.status, 'CANCELLED', actor, { request });
+
+    const { rows: live } = await client.query(
+      `SELECT * FROM referrals WHERE request_id = $1 AND status IN ('PENDING', 'ACCEPTED') ORDER BY id FOR UPDATE`,
+      [id]
+    );
+    const released = [];
+    for (const ref of live) {
+      referralState.assertTransition(ref.status, 'CANCELLED', 'DOCTOR', { referral: ref });
+      if (ref.status === 'ACCEPTED' && Array.isArray(ref.reservation_lines) && ref.reservation_lines.length) {
+        const r = await stock.release(
+          { shopId: ref.to_shop_id, referralId: ref.id, lines: ref.reservation_lines, performedBy: user.id },
+          { client }
+        );
+        released.push({ referralId: ref.id, shopId: ref.to_shop_id, released: r.released });
+      }
+      await client.query(
+        `UPDATE referrals SET status = 'CANCELLED', cancelled_at = now(), cancel_reason = 'Request cancelled by doctor'
+          WHERE id = $1`,
+        [ref.id]
+      );
+    }
+
+    await client.query(
+      `UPDATE stock_requests SET status = 'CANCELLED', cancelled_at = now(), cancel_reason = $2 WHERE id = $1`,
+      [id, reason]
+    );
+    const updated = await getById(id, { client });
+    return { ...updated, cancelledReferrals: live.map((r) => r.id), released };
+  });
+}
+
 module.exports = {
+  acknowledge,
+  close,
+  cancel,
+  liveReferralCount,
   create,
   getById,
   getByIdOrThrow,
