@@ -7,6 +7,8 @@ const { errorHandler, notFound } = require('./middleware/errorHandler');
 const authRoutes = require('./modules/auth/auth.routes');
 const userRoutes = require('./modules/users/users.routes');
 const doctorRoutes = require('./modules/doctors/doctors.routes');
+const shopRoutes = require('./modules/shops/shops.routes');
+const patientRoutes = require('./modules/patients/patients.routes');
 const requestRoutes = require('./modules/requests/request.routes');
 
 function createApp() {
@@ -31,10 +33,11 @@ function createApp() {
   app.use('/auth', authRoutes);
   app.use('/users', userRoutes);
   app.use('/doctors', doctorRoutes);
+  app.use('/shops', shopRoutes);
+  app.use('/patients', patientRoutes);
   app.use('/requests', requestRoutes);
 
   // Module routers still to land:
-  //   Commit 3 (Nov 8):  /shops, /shops/:id/staff, /patients
   //   Commit 4 (Nov 10): /{users,patients,shops}/:id/phones, /phones/:id/verify
   //   Commit 5 (Nov 12): /notifications
 

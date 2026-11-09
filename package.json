@@ -1,6 +1,6 @@
 {
   "name": "dosely",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Dosely \u2014 ApDe Project pharmacy module MVP (Express + PostgreSQL)",
   "main": "src/server.js",
   "private": true,

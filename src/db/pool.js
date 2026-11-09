@@ -7,6 +7,9 @@ const config = require('../config');
 types.setTypeParser(20, (v) => Number.parseInt(v, 10));
 // Return NUMERIC (e.g. latitude/longitude, prices) as numbers.
 types.setTypeParser(1700, (v) => Number.parseFloat(v));
+// Return DATE as 'YYYY-MM-DD' strings (no timezone shift), matching the
+// team convention for dateOfBirth, expiryDate, etc. timestamptz stays a Date.
+types.setTypeParser(1082, (v) => v);
 
 const pool = new Pool({
   connectionString: config.db.connectionString,

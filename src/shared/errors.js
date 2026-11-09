@@ -43,6 +43,12 @@ const ErrorCodes = Object.freeze({
   NOT_SHOP_STAFF: { status: 403, message: 'You are not staff of this shop' },
   NOT_SHOP_OWNER: { status: 403, message: 'Only the shop OWNER can do this' },
   STAFF_ALREADY_EXISTS: { status: 409, message: 'User is already staff of this shop' },
+  SHOPKEEPER_ROLE_REQUIRED: { status: 400, message: 'Only SHOPKEEPER users can be shop staff' },
+  LAST_OWNER: { status: 409, message: 'A shop must keep at least one active OWNER' },
+  STAFF_NOT_FOUND: { status: 404, message: 'User is not staff of this shop' },
+
+  // Patients (A8)
+  PATIENT_INACTIVE: { status: 409, message: 'Patient is deactivated' },
 
   // Phones (A9, rules P1–P13, edge cases 4/9/10)
   PHONE_INVALID: { status: 400, message: 'Phone number is not valid' },

@@ -13,7 +13,7 @@ npm install
 cp .env.example .env            # edit DATABASE_URL
 createdb pharmacy_mvp           # or: psql -c 'CREATE DATABASE pharmacy_mvp'
 npm run migrate                 # apply db/migrations/*.sql
-npm run seed                    # demo users (shops/patients from Commit 3, Nov 8)
+npm run seed                    # demo users, shops, staff, patients
 npm start                       # http://localhost:3000/health
 ```
 
@@ -52,8 +52,23 @@ After `npm run seed` (password for all: `Dosely@123`, or `SEED_PASSWORD` in `.en
 | admin@dosely.dev | ADMIN | |
 | doctor@dosely.dev | DOCTOR | registration no. KMC-100245, can send requests |
 | doctor.noreg@dosely.dev | DOCTOR | no registration no., can't send requests |
-| shopkeeper@dosely.dev | SHOPKEEPER | becomes shop OWNER in Commit 3 |
-| staff@dosely.dev | SHOPKEEPER | becomes shop STAFF in Commit 3 |
+| shopkeeper@dosely.dev | SHOPKEEPER | OWNER of DSL-JAY-01 (Jayanagar) |
+| staff@dosely.dev | SHOPKEEPER | STAFF of DSL-JAY-01 |
+| owner.kor@dosely.dev | SHOPKEEPER | OWNER of DSL-KOR-02 and DSL-WHF-04 |
+| owner.ind@dosely.dev | SHOPKEEPER | OWNER of DSL-IND-03 |
+
+### Demo shops and patients
+
+| Code | Shop | Area, pincode | Notes |
+| --- | --- | --- | --- |
+| DSL-JAY-01 | Jayanagar Health Pharmacy | Jayanagar, 560011 | has an OWNER and a STAFF member |
+| DSL-KOR-02 | Koramangala MedPlus Point | Koramangala, 560095 | |
+| DSL-IND-03 | Indiranagar Care Chemists | Indiranagar, 560038 | no coordinates |
+| DSL-WHF-04 | Whitefield Night Pharmacy | Whitefield, 560066 | **inactive** — can't receive requests |
+
+Patients (added by doctor@): Arjun Mehta, Priya Nair, Rohan Das (child), Lakshmi Iyer (senior),
+Sam Thomas (no DOB/gender), Meera Pillai. Look ids up with `GET /shops?search=DSL-` and `GET /patients`,
+or in SQL by `code` / `full_name` — don't hard-code ids.
 
 ```bash
 curl -s -X POST localhost:3000/auth/login -H 'content-type: application/json' \
@@ -82,6 +97,19 @@ All routes except `POST /auth/login` need `Authorization: Bearer <token>`.
 | GET /doctors/me | DOCTOR | own profile, incl. `canSendRequests` |
 | PATCH /doctors/:id | that doctor or ADMIN | |
 | DELETE /doctors/:id, POST /doctors/:id/activate | ADMIN | deactivate / activate |
+| POST /shops | SHOPKEEPER (becomes OWNER) or ADMIN (`ownerUserId`) | `{ name, code, drugLicenceNo, address, area, city?, pincode, latitude?, longitude? }` |
+| GET /shops | logged in | `?search=&area=&pincode=&isActive=&mine=true&limit=&offset=` |
+| GET /shops/:shopId | logged in | includes `myRole` (OWNER / STAFF / null) |
+| PATCH /shops/:shopId | OWNER or ADMIN | any shop field |
+| DELETE /shops/:shopId, POST /shops/:shopId/activate | OWNER or ADMIN | deactivate / activate |
+| GET /shops/:shopId/staff | shop staff or ADMIN | `?includeRemoved=true` |
+| POST /shops/:shopId/staff | OWNER or ADMIN | `{ userId, staffRole? = STAFF }` — SHOPKEEPER users only |
+| PATCH /shops/:shopId/staff/:userId | OWNER or ADMIN | `{ staffRole }` |
+| DELETE /shops/:shopId/staff/:userId | OWNER or ADMIN | remove; the last OWNER can't be removed or demoted |
+| POST /patients | DOCTOR, SHOPKEEPER, ADMIN | `{ fullName, dateOfBirth? (YYYY-MM-DD), gender? }` |
+| GET /patients | DOCTOR, SHOPKEEPER, ADMIN | `?search=&isActive=&mine=true&limit=&offset=` (phone search in Commit 4) |
+| GET /patients/:id, PATCH /patients/:id | DOCTOR, SHOPKEEPER, ADMIN | responses include `age` |
+| DELETE /patients/:id | creator or ADMIN | deactivate; `POST /patients/:id/activate` (ADMIN) |
 
 ### Using auth in your module (Rachana, Anushka)
 
@@ -96,9 +124,27 @@ router.post('/', requireRole('DOCTOR'), idempotency(), asyncHandler(async (req, 
   const doctor = await doctors.assertCanSendRequests(req.user.id); // throws DOCTOR_REG_NO_REQUIRED
   …
 }));
-router.patch('/shops/:shopId/inventory/:id', requireShopStaff(), …);         // any active staff (shops land Nov 8)
-router.delete('/shops/:shopId/staff/:id', requireShopStaff({ owner: true }), …); // OWNER only
+router.patch('/shops/:shopId/inventory/:id', requireShopStaff(), …);  // any active staff → req.shopStaff = { shopId, staffRole }
+router.post('/shops/:shopId/thresholds', requireShopStaff({ owner: true }), …); // OWNER only
 ```
+
+### Shop and patient helpers (Commit 3)
+
+```js
+const shops = require('../shops/shops.service');
+const patients = require('../patients/patients.service');
+
+await shops.assertCanReceiveRequests(shopId);   // throws NOT_FOUND / SHOP_INACTIVE (A6) — call before sending a request or referral
+await patients.assertActive(patientId);          // throws NOT_FOUND / PATIENT_INACTIVE
+await shops.listActiveStaffUserIds(shopId);      // [userId…] active staff with active accounts (used by notification fan-out)
+await shops.listShopsForUser(userId);            // [{ shopId, staffRole }]
+```
+
+DATE columns come back from the database as `'YYYY-MM-DD'` strings (not JS Dates), e.g. `dateOfBirth`, `expiryDate`.
+
+**Anushka:** `shops` and `patients` are on `main` now (migration 003), so your 02x migration can add the
+foreign keys for `stock_requests.shop_id / patient_id` and `referrals.from_shop_id / to_shop_id`.
+**Rachana:** inventory can reference `shops(id)` now.
 
 ADMIN passes `requireShopStaff` for every shop. Idempotent replays carry the header `Idempotent-Replayed: true`.
 
@@ -293,7 +339,7 @@ Until Izaz's `shops` / `shop_staff` tables land, `src/modules/requests/shopAcces
 | --- | --- | --- |
 | 1 | Tue Nov 4 | Scaffold, migration 001 (enums + conventions), error codes, notification stubs ✅ |
 | 2 | Thu Nov 6 | Users, bcrypt, JWT login, rbac + idempotency middleware, doctors ✅ |
-| 3 | Sat Nov 8 | Shops, shop staff, patients + seed data |
+| 3 | Sat Nov 8 | Shops, shop staff, patients + seed data ✅ |
 | 4 | Mon Nov 10 | Phone numbers, validator, CRUD, rules P1–P10 |
 | 5 | Wed Nov 12 | Rules P11–P13, verify route, real notification.service + inbox |
 | 6 | Fri Nov 14 | SMS/email channels, retries with backoff, unreachable after 3 failures |
