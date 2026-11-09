@@ -229,6 +229,24 @@ Tables so far (migration `010`, numbers 010–019 claimed for catalog + stock): 
 - Batch number is unique per medicine; `mrp` is INR per base unit (> 0); manufacture date must be before expiry.
 - A medicine with no batches can be hard-deleted; once it has one, the delete maps to `409 MEDICINE_IN_USE`
   (deactivate it instead). Batches and generics are never hard-deleted.
+- A batch is expired when its expiry date is today or earlier (India time); expired batches can't be added.
+
+### Catalog API
+
+| Method & path | Who | What |
+| --- | --- | --- |
+| GET /medicines | logged in | `?q=&genericId=&dosageForm=&prescriptionRequired=&isActive=&limit=&offset=` — `q` matches brand, generic and manufacturer; non-admins see active only |
+| GET /medicines/:id | logged in | medicine + sellable batches (earliest expiry first) |
+| POST /medicines | ADMIN | `{ brandName, genericId \| genericName, manufacturer, dosageForm, strength, baseUnit, prescriptionRequired?, batches?: [{ batchNo, manufactureDate?, expiryDate, mrp }] }` |
+| PATCH /medicines/:id | ADMIN | any of the fields above except `genericName`; `baseUnit` is locked once batches exist |
+| POST /medicines/:id/deactivate, /activate | ADMIN | |
+| DELETE /medicines/:id | ADMIN | only while it has no batches, else `409 MEDICINE_IN_USE` |
+| GET /medicines/:id/batches | logged in | `?includeExpired=true` |
+| POST /medicines/:id/batches | ADMIN | `{ batchNo, manufactureDate?, expiryDate, mrp }` → `422 BATCH_EXPIRED`, `409 BATCH_NO_TAKEN` |
+| GET /generics, /generics/:id | logged in | `?q=&isActive=` |
+| POST /generics, PATCH /generics/:id | ADMIN | `{ name, description? }` (+ `isActive` on PATCH) → `409 GENERIC_NAME_TAKEN` |
+
+`genericName` finds the generic ignoring case, or creates it. Batch numbers are stored trimmed and upper-case.
 
 ### stock.service contract (agree Nov 4)
 
@@ -274,7 +292,7 @@ await stock.dispense({ shopId, medicineId, quantity, requestId, performedBy, ide
 | # | Due | Deliverable |
 | --- | --- | --- |
 | 1 | Tue Nov 4 | Migrations for generics, medicines, batches; stock.service stub with agreed signatures ✅ |
-| 2 | Thu Nov 6 | Catalog services and routes: search, create, edit, deactivate, MEDICINE_IN_USE (B1–B3) |
+| 2 | Thu Nov 6 | Catalog services and routes: search, create, edit, deactivate, MEDICINE_IN_USE (B1–B3) ✅ |
 | 3 | Sat Nov 8 | Inventory + stock_movements (grants revoked); real stockIn (B4, B5, B7) |
 | 4 | Mon Nov 10 | Real dispense: FEFO, atomic update, batch-order locks, idempotency (B8); adjust, writeOff (B9) |
 | 5 | Wed Nov 12 | reserve/release, STALE_INVENTORY, availability helper (B10), inventory list route |
