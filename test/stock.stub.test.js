@@ -7,7 +7,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const stock = require('../src/modules/inventory/stock.service');
+const stock = require('../src/modules/inventory/stock.stub');
 
 const days = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
 const SHOP = 1;

@@ -220,15 +220,25 @@ Patients have no login, so `IN_APP` to a patient is a validation error.
 
 ## Catalog and stock (Rachana)
 
-Tables so far (migration `010`, numbers 010–019 claimed for catalog + stock): `generics`,
-`medicines`, `medicine_batches`, plus enums `dosage_form`, `base_unit`, `stock_movement_type`.
-`inventory`, `stock_movements` and `stock_thresholds` land Nov 8.
+Migrations `010`–`019` are claimed for catalog + stock.
+
+- `010`: `generics`, `medicines`, `medicine_batches`, enums `dosage_form`, `base_unit`, `stock_movement_type`.
+- `011`: `inventory` (one row per shop + batch: `quantity >= 0`, `0 <= reserved <= quantity`, `version`)
+  and the `stock_movements` ledger, both referencing `shops`. `request_id` and `referral_id` have no
+  foreign keys yet (`020` runs after `011`); a later migration adds them.
+- `stock_thresholds` lands Nov 14.
 
 - Generic names are unique ignoring case. Medicines are unique on brand + manufacturer + form + strength;
   `prescription_required` defaults to true.
 - Batch number is unique per medicine; `mrp` is INR per base unit (> 0); manufacture date must be before expiry.
 - A medicine with no batches can be hard-deleted; once it has one, the delete maps to `409 MEDICINE_IN_USE`
   (deactivate it instead). Batches and generics are never hard-deleted.
+- **Only stock.service writes stock (B6).** It switches on `dosely.stock_writer` for its own transaction;
+  any other `INSERT`/`UPDATE` on `inventory` fails with `STOCK_WRITE_FORBIDDEN`. Inventory rows at 0 are kept.
+- **The ledger is append-only (B5).** `UPDATE`, `DELETE` and `TRUNCATE` on `stock_movements` fail with
+  `LEDGER_APPEND_ONLY`, even for superusers. The migration also creates a `dosely_app` role with
+  `SELECT, INSERT` only on the ledger; in production the app should log in as a member of it.
+- Every movement row's `delta` sign must match its type, and `ADJUSTMENT` / `EXPIRY_WRITE_OFF` need a `reason`.
 - A batch is expired when its expiry date is today or earlier (India time); expired batches can't be added.
 
 ### Catalog API
@@ -250,12 +260,28 @@ Tables so far (migration `010`, numbers 010–019 claimed for catalog + stock): 
 
 ### stock.service contract (agree Nov 4)
 
-`src/modules/inventory/stock.service.js` is the **only** code that changes stock. Today it is a stub that
-validates input like the real service and keeps stock in memory, so FEFO, `INSUFFICIENT_STOCK`,
-`BATCH_EXPIRED`, `BATCH_MISMATCH`, `STALE_INVENTORY` and idempotent replays already behave realistically.
-Real versions replace it with the same signatures: `stockIn` Nov 8, `dispense`/`adjust`/`writeOff` Nov 10,
-`reserve`/`release`/`getAvailable` Nov 12. Every function takes `opts = { client }` last to join your
-transaction. Full JSDoc is in the file.
+`src/modules/inventory/stock.service.js` is the **only** code that changes stock. Every function takes
+`opts = { client }` last to join your transaction (SAVEPOINT). Full JSDoc is in the file.
+
+| Function | Status |
+| --- | --- |
+| `stockIn` | **real** since Nov 8 |
+| `getAvailable` | **real** since Nov 8 (brought forward from Nov 12 so lookups see real stock) |
+| `reserve`, `release` | **real** since Nov 8 (brought forward so referral holds use real stock) |
+| `dispense`, `adjust`, `writeOff` | stub until Nov 10 |
+
+The stubs live in `stock.stub.js`: they validate input like the real service and keep their own stock in
+memory (FEFO, `INSUFFICIENT_STOCK`, `STALE_INVENTORY`, idempotent replays), so they **don't** see stock
+received through the real `stockIn` yet.
+
+`reserve` locks rows in `batch_id` order (as `dispense` will), so two referrals racing for the last units
+can't both win. Call it once per referral (inside the PENDING → ACCEPTED transition) and keep its `lines`;
+`release` never takes `reserved` below 0, so calling it twice is safe.
+
+`POST /shops/:shopId/stock-in` (any active staff of the shop, or ADMIN; `Idempotency-Key` required):
+`{ medicineId, batchNo, manufactureDate?, expiryDate, mrp, quantity, reason? }` → `201 { batch, batchCreated,
+inventory, movement, replayed }`. Errors: `422 BATCH_EXPIRED`, `409 BATCH_MISMATCH`, `409 SHOP_INACTIVE`,
+`409 MEDICINE_INACTIVE`, `403 NOT_SHOP_STAFF`. `getAvailable` only counts active shops.
 
 ```js
 const stock = require('../inventory/stock.service');
@@ -293,7 +319,7 @@ await stock.dispense({ shopId, medicineId, quantity, requestId, performedBy, ide
 | --- | --- | --- |
 | 1 | Tue Nov 4 | Migrations for generics, medicines, batches; stock.service stub with agreed signatures ✅ |
 | 2 | Thu Nov 6 | Catalog services and routes: search, create, edit, deactivate, MEDICINE_IN_USE (B1–B3) ✅ |
-| 3 | Sat Nov 8 | Inventory + stock_movements (grants revoked); real stockIn (B4, B5, B7) |
+| 3 | Sat Nov 8 | Inventory + stock_movements (grants revoked); real stockIn (B4, B5, B7) ✅ |
 | 4 | Mon Nov 10 | Real dispense: FEFO, atomic update, batch-order locks, idempotency (B8); adjust, writeOff (B9) |
 | 5 | Wed Nov 12 | reserve/release, STALE_INVENTORY, availability helper (B10), inventory list route |
 | 6 | Fri Nov 14 | Thresholds (B11), expiryScan + lowStockScan jobs, post-dispense low-stock check (B12), seed stock |

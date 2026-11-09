@@ -12,6 +12,7 @@ const patientRoutes = require('./modules/patients/patients.routes');
 const requestRoutes = require('./modules/requests/request.routes');
 const medicineRoutes = require('./modules/medicines/medicines.routes');
 const genericRoutes = require('./modules/medicines/generics.routes');
+const inventoryRoutes = require('./modules/inventory/inventory.routes');
 
 function createApp() {
   const app = express();
@@ -40,6 +41,7 @@ function createApp() {
   app.use('/requests', requestRoutes);
   app.use('/medicines', medicineRoutes); // Rachana: catalog (B1–B3)
   app.use('/generics', genericRoutes);
+  app.use('/shops', inventoryRoutes); // Rachana: /shops/:shopId/stock-in (B4–B7)
 
   // Module routers still to land:
   //   Commit 4 (Nov 10): /{users,patients,shops}/:id/phones, /phones/:id/verify
