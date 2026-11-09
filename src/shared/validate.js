@@ -59,6 +59,24 @@ function validate(input, schema, opts = {}) {
         v = n;
         break;
       }
+      case 'number': {
+        const n = typeof v === 'string' && v.trim() !== '' ? Number(v) : v;
+        if (typeof n !== 'number' || !Number.isFinite(n)) { errors.push({ field, issue: 'must be a number' }); continue; }
+        if (rule.min !== undefined && n < rule.min) { errors.push({ field, issue: `must be >= ${rule.min}` }); continue; }
+        if (rule.max !== undefined && n > rule.max) { errors.push({ field, issue: `must be <= ${rule.max}` }); continue; }
+        v = n;
+        break;
+      }
+      case 'date': {
+        // YYYY-MM-DD, a real calendar date; optional notFuture / minDate
+        if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v.trim())) { errors.push({ field, issue: 'must be a date (YYYY-MM-DD)' }); continue; }
+        v = v.trim();
+        const d = new Date(`${v}T00:00:00Z`);
+        if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== v) { errors.push({ field, issue: 'is not a real date' }); continue; }
+        if (rule.notFuture && v > new Date().toISOString().slice(0, 10)) { errors.push({ field, issue: 'cannot be in the future' }); continue; }
+        if (rule.minDate && v < rule.minDate) { errors.push({ field, issue: `must be on or after ${rule.minDate}` }); continue; }
+        break;
+      }
       case 'boolean': {
         if (v === 'true') v = true;
         else if (v === 'false') v = false;
