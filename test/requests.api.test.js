@@ -4,7 +4,7 @@
  * Requests API (C1–C3, edge cases 1, 7, 13).
  * Commit 2 "done when": a doctor can send a request and the shop sees it in its inbox.
  * Needs PostgreSQL (DATABASE_URL); skipped when unreachable. Uses the seeded
- * demo users, a fresh medicine and a random shop id, so it's safe on a dev DB.
+ * demo users plus fresh shops and medicines, so it's safe on a dev DB.
  * Stock comes from Rachana's in-memory stock.service stub.
  */
 
@@ -16,6 +16,7 @@ const migrate = require('../src/db/migrate');
 const seeds = require('../src/db/seed');
 const stock = require('../src/modules/inventory/stock.service');
 const { createApp } = require('../src/app');
+const { hashPassword } = require('../src/shared/password');
 
 const PASSWORD = process.env.SEED_PASSWORD || 'Dosely@123';
 let dbUp = false;
@@ -52,6 +53,23 @@ async function newMedicine(isActive = true) {
   return m.id;
 }
 
+/** A new active shop with this test's own shopkeeper as STAFF (unless staffed: false). */
+async function newShop({ isActive = true, staffed = true } = {}) {
+  const code = `T-${uniq().toUpperCase()}`;
+  const { rows: [shop] } = await pool.query(
+    `INSERT INTO shops (name, code, drug_licence_no, address, area, city, pincode, is_active)
+     VALUES ($1, $2, $3, '1 Test Road', 'Jayanagar', 'Bengaluru', '560041', $4) RETURNING id`,
+    [`Test Shop ${code}`, code, `DL-${code}`, isActive]
+  );
+  if (staffed) {
+    await pool.query(
+      `INSERT INTO shop_staff (shop_id, user_id, staff_role) VALUES ($1, $2, 'STAFF')`,
+      [shop.id, ctx.shopUserId]
+    );
+  }
+  return shop.id;
+}
+
 async function putStock(shopId, medicineId, quantity) {
   await stock.stockIn({
     shopId, medicineId, batchNo: `B${uniq()}`, expiryDate: '2099-12-31', mrp: 2.5, quantity, performedBy: 1,
@@ -72,9 +90,16 @@ test.before(async () => {
   base = `http://127.0.0.1:${server.address().port}`;
   tok.doctor = await login('doctor@dosely.dev');
   tok.noreg = await login('doctor.noreg@dosely.dev');
-  tok.shop = await login('shopkeeper@dosely.dev');
+  // own shopkeeper, so the seeded demo staff keep exactly their seeded shops
+  ctx.shopEmail = `req.shop.${uniq()}@dosely.test`;
+  const { rows: [su] } = await pool.query(
+    `INSERT INTO users (role, full_name, email, password_hash) VALUES ('SHOPKEEPER', 'Request Test Staff', $1, $2) RETURNING id`,
+    [ctx.shopEmail, await hashPassword(PASSWORD)]
+  );
+  ctx.shopUserId = su.id;
+  tok.shop = await login(ctx.shopEmail);
   tok.admin = await login('admin@dosely.dev');
-  ctx.shopId = 100000 + crypto.randomInt(800000);
+  ctx.shopId = await newShop();
   ctx.medicineId = await newMedicine();
   await putStock(ctx.shopId, ctx.medicineId, 3);
 });
@@ -88,6 +113,8 @@ const t = (name, fn) => test(name, async (c) => (dbUp ? fn(c) : c.skip('no datab
 
 const send = (body, token = tok.doctor, key) =>
   api('POST', '/requests', { token, key, body: { shopId: ctx.shopId, medicineId: ctx.medicineId, quantity: 10, ...body } });
+
+const act = (id, action, token, body) => api('POST', `/requests/${id}/${action}`, { token, body, key: crypto.randomUUID() });
 
 t('C1/C2: doctor sends a request; snapshot, number, urgency and expiry are stored', async () => {
   const before = Date.now();
@@ -120,7 +147,7 @@ t('C1 / edge case 1: no request when the shop already has enough stock', async (
 });
 
 t('edge case 7: a shop with zero stock can be sent a request (snapshot 0)', async () => {
-  const r = await send({ shopId: ctx.shopId + 1, quantity: 1 });
+  const r = await send({ shopId: await newShop(), quantity: 1 });
   assert.equal(r.status, 201);
   assert.equal(r.body.availableQtySnapshot, 0);
 });
@@ -140,6 +167,24 @@ t('edge case 13: deactivated or unknown medicine is refused', async () => {
   assert.equal(r.body.error.code, 'MEDICINE_INACTIVE');
   const missing = await send({ medicineId: 999999999 });
   assert.equal(missing.status, 404);
+});
+
+t('edge case 13: deactivated or unknown shop is refused', async () => {
+  const r = await send({ shopId: await newShop({ isActive: false }) });
+  assert.equal(r.status, 409);
+  assert.equal(r.body.error.code, 'SHOP_INACTIVE');
+  assert.equal((await send({ shopId: 999999999 })).status, 404);
+});
+
+t('shop staff only see and act on their own shop’s requests', async () => {
+  const other = await newShop({ staffed: false });
+  const r = await send({ shopId: other, quantity: 2 });
+  assert.equal(r.status, 201);
+  const inbox = await api('GET', `/requests?shopId=${other}`, { token: tok.shop });
+  assert.equal(inbox.status, 403);
+  assert.equal(inbox.body.error.code, 'NOT_SHOP_STAFF');
+  assert.equal((await api('GET', `/requests/${r.body.id}`, { token: tok.shop })).status, 403);
+  assert.equal((await act(r.body.id, 'acknowledge', tok.shop)).status, 403);
 });
 
 t('only doctors with a registration number can send requests', async () => {
@@ -202,7 +247,6 @@ t('C3: inbox needs shopId; doctors cannot read the inbox or other doctors’ req
 // Commit 3: acknowledge, close, cancel (C4, C5, edge cases 11, 16)
 // ---------------------------------------------------------------------------
 
-const act = (id, action, token, body) => api('POST', `/requests/${id}/${action}`, { token, body, key: crypto.randomUUID() });
 
 t('C5: shop acknowledges a SENT request once; a second acknowledge is 409', async () => {
   const r = await send({ quantity: 9 });
@@ -287,14 +331,14 @@ t('C5: doctor cancels from SENT and from ACKNOWLEDGED', async () => {
 });
 
 t('edge case 11: cancel after a referral was accepted releases the held stock', async () => {
-  const target = ctx.shopId + 2;
+  const target = await newShop();
   await putStock(target, ctx.medicineId, 5);
   const before = await stock.getAvailable(ctx.medicineId, { shopIds: [target] });
   assert.equal(before[0].available, 5);
 
   const r = await send({ quantity: 9 });
   await act(r.body.id, 'acknowledge', tok.shop);
-  const { rows: [{ id: staffId }] } = await pool.query(`SELECT id FROM users WHERE email = 'shopkeeper@dosely.dev'`);
+  const staffId = ctx.shopUserId;
   const { rows: [refRow] } = await pool.query(
     `INSERT INTO referrals (request_id, from_shop_id, to_shop_id, quantity, available_qty_seen, referred_by)
      VALUES ($1, $2, $3, 5, 5, $4) RETURNING id`,
