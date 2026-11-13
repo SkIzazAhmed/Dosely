@@ -283,7 +283,8 @@ Migrations `010`–`019` are claimed for catalog + stock.
 - `011`: `inventory` (one row per shop + batch: `quantity >= 0`, `0 <= reserved <= quantity`, `version`)
   and the `stock_movements` ledger, both referencing `shops`. `request_id` and `referral_id` have no
   foreign keys yet (`020` runs after `011`); a later migration adds them.
-- `stock_thresholds` lands Nov 14.
+- `012`: `stock_thresholds` (per shop + medicine reorder level) and `stock_alerts` (one row per alert sent;
+  its unique index is what stops repeats), plus `medicine_batches.expired_flagged_at`.
 
 - Generic names are unique ignoring case. Medicines are unique on brand + manufacturer + form + strength;
   `prescription_required` defaults to true.
@@ -344,6 +345,33 @@ walk-ins; `dispense({ reservation: lines })` takes exactly the held units and cl
 | GET /shops/:shopId/inventory | shop staff | `?medicineId=&q=&expiring=90&expired=true&includeEmpty=true` → one row per batch, earliest expiry first, with `version` |
 | GET /shops/:shopId/movements | shop staff | `?batchId=&medicineId=&type=` → ledger, newest first |
 | GET /medicines/:id/availability | logged in | `?shopIds=1,2` → non-expired, unreserved units per active shop |
+| GET /shops/:shopId/thresholds | shop staff | `?low=true` → reorder levels with `available` and `isLow` |
+| PUT /shops/:shopId/thresholds/:medicineId | shop OWNER | `{ minQuantity }` (create or change) |
+| DELETE /shops/:shopId/thresholds/:medicineId | shop OWNER | |
+
+`GET /shops/:shopId/inventory?low=true` lists the batches of medicines that are below the shop's threshold.
+
+#### Alerts and daily jobs (B12)
+
+A medicine is **low** at a shop when its non-expired, unreserved units are below the shop's threshold.
+
+| Alert | Sent by | At most |
+| --- | --- | --- |
+| `LOW_STOCK` | `dispense` (right after stock drops below the threshold) and `lowStockScan` | once per shop + medicine per day |
+| `EXPIRY_ALERT` | `expiryScan`, batches expiring within 90 days | once per shop + batch per week |
+| `BATCH_EXPIRED` | `expiryScan`, expired batches still holding units ("write them off") | once per shop + batch |
+
+Alerts go to every active staff member of the shop through `notification.service.notifyShop` (IN_APP).
+Each one is first recorded in `stock_alerts`; a repeat in the same period records and sends nothing,
+even if two jobs overlap. The post-dispense check runs inside the dispense transaction, so a rolled-back
+dispense leaves no alert. `expiryScan` also stamps newly expired batches with `expired_flagged_at`.
+
+Run the jobs by hand with `npm run job:expiry` and `npm run job:low-stock`, or set `ENABLE_JOBS=true` and
+the server runs both every day at 06:00 India time (and once shortly after start-up).
+
+`npm run seed` adds demo stock: 10 common medicines (Dolo 650, Pan 40, Azithral 500, …) with batches at
+Jayanagar, Koramangala and Indiranagar, a few expiring within 90 days, and thresholds where Dolo 650 and
+Azithral 500 are low at Jayanagar. Re-running it adds nothing.
 
 To edit stock safely: read the row from `/inventory`, send its `version` as `expectedVersion`; if someone
 changed it meanwhile you get `409 STALE_INVENTORY` with the current version — reload and retry.
@@ -393,7 +421,7 @@ await stock.dispense({ shopId, medicineId, quantity, requestId, performedBy, ide
 | 3 | Sat Nov 8 | Inventory + stock_movements (grants revoked); real stockIn (B4, B5, B7) ✅ |
 | 4 | Mon Nov 10 | Real dispense: FEFO, atomic update, batch-order locks, idempotency (B8); adjust, writeOff (B9) ✅ |
 | 5 | Wed Nov 12 | reserve/release, STALE_INVENTORY, availability helper (B10), inventory list route ✅ |
-| 6 | Fri Nov 14 | Thresholds (B11), expiryScan + lowStockScan jobs, post-dispense low-stock check (B12), seed stock |
+| 6 | Fri Nov 14 | Thresholds (B11), expiryScan + lowStockScan jobs, post-dispense low-stock check (B12), seed stock ✅ |
 | 7 | Sun Nov 16 | FEFO + concurrent dispense tests, edge cases 3, 5, 6, 14, 15; merge to main |
 
 ## Requests and referrals (Anushka)

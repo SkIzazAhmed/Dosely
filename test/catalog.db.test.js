@@ -51,10 +51,10 @@ async function fails(client, sql, params) {
 }
 
 async function seedMedicine(client) {
-  const g = await client.query(`INSERT INTO generics (name) VALUES ('Paracetamol') RETURNING id`);
+  const g = await client.query(`INSERT INTO generics (name) VALUES ('Testamol') RETURNING id`);
   const m = await client.query(
     `INSERT INTO medicines (brand_name, generic_id, manufacturer, dosage_form, strength, base_unit)
-     VALUES ('Dolo 650', $1, 'Micro Labs', 'TABLET', '650 mg', 'TABLET') RETURNING *`,
+     VALUES ('Testol 650', $1, 'Testo Labs', 'TABLET', '650 mg', 'TABLET') RETURNING *`,
     [g.rows[0].id]
   );
   return { genericId: g.rows[0].id, medicine: m.rows[0] };
@@ -63,8 +63,8 @@ async function seedMedicine(client) {
 test('generic names are unique ignoring case and spaces', async (t) => {
   if (!dbUp) return t.skip('no database');
   await scratch(async (c) => {
-    await c.query(`INSERT INTO generics (name) VALUES ('Amoxicillin')`);
-    const err = await fails(c, `INSERT INTO generics (name) VALUES (' amoxicillin ')`);
+    await c.query(`INSERT INTO generics (name) VALUES ('Testacillin')`);
+    const err = await fails(c, `INSERT INTO generics (name) VALUES (' testacillin ')`);
     assert.equal(err.code, '23505');
     assert.equal(fromPgError(err, { generics_name_lower_key: 'GENERIC_NAME_TAKEN' }).code, 'GENERIC_NAME_TAKEN');
   });
@@ -78,14 +78,14 @@ test('medicines default to prescription required and are unique on brand+manufac
     const err = await fails(
       c,
       `INSERT INTO medicines (brand_name, generic_id, manufacturer, dosage_form, strength, base_unit)
-       VALUES ('DOLO 650', $1, 'micro labs', 'TABLET', '650mg', 'TABLET')`,
+       VALUES ('TESTOL 650', $1, 'testo labs', 'TABLET', '650mg', 'TABLET')`,
       [genericId]
     );
     assert.equal(err.constraint, 'medicines_identity_key');
     // a different form is a different medicine
     await c.query(
       `INSERT INTO medicines (brand_name, generic_id, manufacturer, dosage_form, strength, base_unit)
-       VALUES ('Dolo 650', $1, 'Micro Labs', 'SYRUP', '650 mg', 'ML')`,
+       VALUES ('Testol 650', $1, 'Testo Labs', 'SYRUP', '650 mg', 'ML')`,
       [genericId]
     );
   });
@@ -113,7 +113,7 @@ test('a medicine without batches can be deleted; with a batch the delete maps to
     const { medicine, genericId } = await seedMedicine(c);
     const other = await c.query(
       `INSERT INTO medicines (brand_name, generic_id, manufacturer, dosage_form, strength, base_unit)
-       VALUES ('Calpol', $1, 'GSK', 'TABLET', '500 mg', 'TABLET') RETURNING id`,
+       VALUES ('Testpol', $1, 'Testo Labs', 'TABLET', '500 mg', 'TABLET') RETURNING id`,
       [genericId]
     );
     await c.query('DELETE FROM medicines WHERE id = $1', [other.rows[0].id]);

@@ -14,7 +14,9 @@
     "migrate:status": "node src/db/migrate.js status",
     "seed": "node src/db/seed.js",
     "db:setup": "npm run migrate && npm run seed",
-    "test": "node --test --test-concurrency=1 \"test/**/*.test.js\""
+    "test": "node --test --test-concurrency=1 \"test/**/*.test.js\"",
+    "job:expiry": "node src/jobs/expiryScan.js",
+    "job:low-stock": "node src/jobs/lowStockScan.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

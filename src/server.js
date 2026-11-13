@@ -9,6 +9,9 @@ const server = app.listen(config.port, () => {
   console.log(`[server] listening on http://localhost:${config.port} (${config.env})`);
 });
 
+// Daily stock jobs (expiryScan, lowStockScan) — Rachana, B12
+if (process.env.ENABLE_JOBS === 'true') require('./jobs/scheduler').start();
+
 let shuttingDown = false;
 async function shutdown(signal) {
   if (shuttingDown) return;

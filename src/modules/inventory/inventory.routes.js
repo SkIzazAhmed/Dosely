@@ -7,8 +7,11 @@
  *   POST /shops/:shopId/dispense      shop staff (or ADMIN)     B8
  *   POST /shops/:shopId/adjustments   shop OWNER (or ADMIN)     B9
  *   POST /shops/:shopId/write-offs    shop OWNER (or ADMIN)     B9
- *   GET  /shops/:shopId/inventory     shop staff  ?medicineId=&q=&expiring=90&expired=true&includeEmpty=true
+ *   GET  /shops/:shopId/inventory     shop staff  ?low=true&expiring=90&medicineId=&q=&expired=true&includeEmpty=true
  *   GET  /shops/:shopId/movements     shop staff  ?batchId=&medicineId=&type=
+ *   GET  /shops/:shopId/thresholds    shop staff  ?low=true
+ *   PUT  /shops/:shopId/thresholds/:medicineId   shop OWNER  { minQuantity }
+ *   DELETE /shops/:shopId/thresholds/:medicineId shop OWNER
  *
  * Middleware is attached per route (not router.use) because the shops
  * router shares the /shops prefix.
@@ -20,6 +23,7 @@ const { validate, idParam, pagination } = require('../../shared/validate');
 const { StockMovementType } = require('../../shared/enums');
 const inventoryModel = require('./inventory.model');
 const movementModel = require('./movement.model');
+const thresholds = require('./threshold.service');
 const { authenticate } = require('../../middleware/auth');
 const { requireShopStaff } = require('../../middleware/rbac');
 const { idempotency } = require('../../middleware/idempotency');
@@ -143,6 +147,7 @@ router.get(
     const f = validate(req.query, {
       medicineId: { type: 'integer', min: 1 },
       q: { type: 'string', max: 100 },
+      low: { type: 'boolean', default: false },
       expiring: { type: 'integer', min: 1, max: 365 },
       expired: { type: 'boolean', default: false },
       includeEmpty: { type: 'boolean', default: false },
@@ -164,6 +169,42 @@ router.get(
       type: { type: 'enum', values: Object.keys(StockMovementType) },
     });
     res.json(await movementModel.listForShop(shopId, f, pagination(req.query)));
+  })
+);
+
+// GET /shops/:shopId/thresholds?low=true — reorder levels with current availability
+router.get(
+  '/:shopId/thresholds',
+  authenticate,
+  requireShopStaff(),
+  asyncHandler(async (req, res) => {
+    const shopId = idParam(req.params.shopId, 'Shop');
+    const { low } = validate(req.query, { low: { type: 'boolean', default: false } });
+    res.json(await thresholds.list(shopId, { low, ...pagination(req.query) }));
+  })
+);
+
+// PUT /shops/:shopId/thresholds/:medicineId { minQuantity } — OWNER
+router.put(
+  '/:shopId/thresholds/:medicineId',
+  authenticate,
+  requireShopStaff({ owner: true }),
+  asyncHandler(async (req, res) => {
+    const shopId = idParam(req.params.shopId, 'Shop');
+    const medicineId = idParam(req.params.medicineId, 'Medicine');
+    const { minQuantity } = validate(req.body, { minQuantity: { type: 'integer', min: 1, max: 1000000, required: true } });
+    res.json(await thresholds.set(shopId, medicineId, minQuantity, req.user.id));
+  })
+);
+
+// DELETE /shops/:shopId/thresholds/:medicineId — OWNER
+router.delete(
+  '/:shopId/thresholds/:medicineId',
+  authenticate,
+  requireShopStaff({ owner: true }),
+  asyncHandler(async (req, res) => {
+    const shopId = idParam(req.params.shopId, 'Shop');
+    res.json(await thresholds.remove(shopId, idParam(req.params.medicineId, 'Medicine')));
   })
 );
 
