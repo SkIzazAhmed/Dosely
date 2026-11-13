@@ -111,4 +111,7 @@ router.post(
   })
 );
 
+// /requests/:id/referrals (C7)
+router.use('/:id/referrals', require('../referrals/referral.routes').forRequest);
+
 module.exports = router;

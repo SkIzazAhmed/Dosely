@@ -374,6 +374,23 @@ recording stand-in for that one function.
 Until Izaz's `shops` / `shop_staff` tables land, `src/modules/requests/shopAccess.js` runs as a stub
 (any shop id is active, any SHOPKEEPER is staff of every shop) and switches to the real checks by itself.
 
+### Referrals API
+
+| Method & path | Who | What |
+| --- | --- | --- |
+| POST /requests/:id/referrals | origin shop staff, ADMIN | `{ toShopId, quantity }`, Idempotency-Key required. From `ACKNOWLEDGED`, `PARTIALLY_FULFILLED` or `REFERRED`; target must be active and have the units now (else `409 INSUFFICIENT_STOCK` with `details.available`). Request → `REFERRED` |
+| GET /requests/:id/referrals | anyone who can see the request | the request's referrals |
+| GET /referrals?shopId=&status= | target shop staff, ADMIN | referral inbox, live ones first |
+| GET /referrals/:id | origin or target staff, ADMIN | one referral |
+| POST /referrals/:id/accept | target shop staff | reserves the units through `stock.reserve` and holds them for `REFERRAL_HOLD_HOURS` (default 24) |
+| POST /referrals/:id/reject | target shop staff | `{ reason }` required (`400 REJECT_REASON_REQUIRED`) |
+| POST /referrals/:id/cancel | origin shop staff | `{ reason? }`; releases held stock through `stock.release` |
+
+Limits (C7): at most 3 referrals per request (`REFERRAL_LIMIT_REACHED`), one live referral per target shop
+(`REFERRAL_DUPLICATE`), live referred quantity ≤ unfulfilled (`REFERRAL_QTY_EXCEEDED`). When a request's last
+live referral ends it steps back to `PARTIALLY_FULFILLED` (something dispensed) or `ACKNOWLEDGED`. Target and
+origin shops get in-app notifications for sent, accepted, rejected and cancelled referrals.
+
 ### Commit plan (Anushka)
 
 | # | Due | Deliverable |
@@ -382,7 +399,7 @@ Until Izaz's `shops` / `shop_staff` tables land, `src/modules/requests/shopAcces
 | 2 | Thu Nov 6 | Create request (snapshot, number, urgency, expiry), doctor list, shop inbox (C1–C3) ✅ |
 | 3 | Sat Nov 8 | Guards for every transition; acknowledge, close, cancel routes; state machine tests (C4, C5) ✅ |
 | 4 | Mon Nov 10 | Availability lookup with ranking; dispense against a request (C6) ✅ |
-| 5 | Wed Nov 12 | Referrals: create, accept with hold, reject, cancel (C7, C8) |
+| 5 | Wed Nov 12 | Referrals: create, accept with hold, reject, cancel (C7, C8) ✅ |
 | 6 | Fri Nov 14 | Pickup verification, patient SMS batching + slip, expiry jobs, 2-hour reminder (C9–C11) |
 | 7 | Sun Nov 16 | Referral flow integration test, edge cases 1, 2, 7, 8, 11, 12, 13, 16; merge to main |
 

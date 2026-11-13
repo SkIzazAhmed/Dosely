@@ -11,6 +11,7 @@ const shopRoutes = require('./modules/shops/shops.routes');
 const patientRoutes = require('./modules/patients/patients.routes');
 const requestRoutes = require('./modules/requests/request.routes');
 const availabilityRoutes = require('./modules/inventory/availability.routes');
+const referralRoutes = require('./modules/referrals/referral.routes');
 const medicineRoutes = require('./modules/medicines/medicines.routes');
 const genericRoutes = require('./modules/medicines/generics.routes');
 const inventoryRoutes = require('./modules/inventory/inventory.routes');
@@ -41,6 +42,7 @@ function createApp() {
   app.use('/patients', patientRoutes);
   app.use('/requests', requestRoutes);
   app.use('/inventory', availabilityRoutes); // Anushka: availability lookup (C6)
+  app.use('/referrals', referralRoutes); // Anushka: referrals (C7, C8)
   app.use('/medicines', medicineRoutes); // Rachana: catalog (B1–B3)
   app.use('/generics', genericRoutes);
   app.use('/shops', inventoryRoutes); // Rachana: /shops/:shopId/stock-in (B4–B7)
