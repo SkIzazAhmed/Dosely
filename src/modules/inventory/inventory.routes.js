@@ -7,6 +7,8 @@
  *   POST /shops/:shopId/dispense      shop staff (or ADMIN)     B8
  *   POST /shops/:shopId/adjustments   shop OWNER (or ADMIN)     B9
  *   POST /shops/:shopId/write-offs    shop OWNER (or ADMIN)     B9
+ *   GET  /shops/:shopId/inventory     shop staff  ?medicineId=&q=&expiring=90&expired=true&includeEmpty=true
+ *   GET  /shops/:shopId/movements     shop staff  ?batchId=&medicineId=&type=
  *
  * Middleware is attached per route (not router.use) because the shops
  * router shares the /shops prefix.
@@ -14,7 +16,10 @@
 
 const express = require('express');
 const asyncHandler = require('../../shared/asyncHandler');
-const { validate, idParam } = require('../../shared/validate');
+const { validate, idParam, pagination } = require('../../shared/validate');
+const { StockMovementType } = require('../../shared/enums');
+const inventoryModel = require('./inventory.model');
+const movementModel = require('./movement.model');
 const { authenticate } = require('../../middleware/auth');
 const { requireShopStaff } = require('../../middleware/rbac');
 const { idempotency } = require('../../middleware/idempotency');
@@ -124,6 +129,41 @@ router.post(
       idempotencyKey: req.get('Idempotency-Key'),
     });
     res.status(201).json(result);
+  })
+);
+
+// GET /shops/:shopId/inventory — one row per batch, earliest expiry first.
+// Each row carries `version`: send it back as expectedVersion on adjustments.
+router.get(
+  '/:shopId/inventory',
+  authenticate,
+  requireShopStaff(),
+  asyncHandler(async (req, res) => {
+    const shopId = idParam(req.params.shopId, 'Shop');
+    const f = validate(req.query, {
+      medicineId: { type: 'integer', min: 1 },
+      q: { type: 'string', max: 100 },
+      expiring: { type: 'integer', min: 1, max: 365 },
+      expired: { type: 'boolean', default: false },
+      includeEmpty: { type: 'boolean', default: false },
+    });
+    res.json(await inventoryModel.listForShop(shopId, f, pagination(req.query)));
+  })
+);
+
+// GET /shops/:shopId/movements — ledger, newest first
+router.get(
+  '/:shopId/movements',
+  authenticate,
+  requireShopStaff(),
+  asyncHandler(async (req, res) => {
+    const shopId = idParam(req.params.shopId, 'Shop');
+    const f = validate(req.query, {
+      batchId: { type: 'integer', min: 1 },
+      medicineId: { type: 'integer', min: 1 },
+      type: { type: 'enum', values: Object.keys(StockMovementType) },
+    });
+    res.json(await movementModel.listForShop(shopId, f, pagination(req.query)));
   })
 );
 

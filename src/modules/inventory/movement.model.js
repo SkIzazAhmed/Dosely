@@ -61,18 +61,40 @@ async function findByIdempotencyKey(shopId, type, key, { client } = {}) {
   return rows.map(toPublic);
 }
 
-async function listForShop(shopId, { batchId, limit = 50, offset = 0, client } = {}) {
+/**
+ * Movement history for a shop, newest first, with batch and medicine names.
+ * @param {number} shopId
+ * @param {{batchId?:number, medicineId?:number, type?:string}} [f]
+ */
+async function listForShop(shopId, f = {}, { limit = 50, offset = 0, client } = {}) {
+  const where = ['sm.shop_id = $1'];
   const params = [shopId];
-  let w = 'shop_id = $1';
-  if (batchId) { params.push(batchId); w += ` AND batch_id = $${params.length}`; }
+  const add = (sql, v) => { params.push(v); where.push(sql.replace('$?', `$${params.length}`)); };
+  if (f.batchId) add('sm.batch_id = $?', f.batchId);
+  if (f.medicineId) add('b.medicine_id = $?', f.medicineId);
+  if (f.type) add('sm.type = $?', f.type);
+  const from = `FROM stock_movements sm JOIN medicine_batches b ON b.id = sm.batch_id
+                JOIN medicines m ON m.id = b.medicine_id WHERE ${where.join(' AND ')}`;
+  const { rows: [{ total }] } = await query(`SELECT count(*)::int AS total ${from}`, params, client);
   params.push(limit, offset);
   const { rows } = await query(
-    `SELECT ${COLUMNS} FROM stock_movements WHERE ${w}
-      ORDER BY id DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
+    `SELECT ${COLUMNS.split(',').map((c) => `sm.${c.trim()}`).join(', ')},
+            b.batch_no, b.medicine_id, m.brand_name
+       ${from}
+      ORDER BY sm.id DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
     params,
     client
   );
-  return rows.map(toPublic);
+  return {
+    items: rows.map((r) => ({
+      ...toPublic(r),
+      batchNo: r.batch_no,
+      medicine: { id: r.medicine_id, brandName: r.brand_name },
+    })),
+    total,
+    limit,
+    offset,
+  };
 }
 
 module.exports = { toPublic, insert, findByIdempotencyKey, listForShop };
