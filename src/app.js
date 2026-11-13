@@ -9,6 +9,8 @@ const userRoutes = require('./modules/users/users.routes');
 const doctorRoutes = require('./modules/doctors/doctors.routes');
 const shopRoutes = require('./modules/shops/shops.routes');
 const patientRoutes = require('./modules/patients/patients.routes');
+const { phoneRouter } = require('./modules/phones/phones.routes');
+const patientsService = require('./modules/patients/patients.service');
 const requestRoutes = require('./modules/requests/request.routes');
 const availabilityRoutes = require('./modules/inventory/availability.routes');
 const referralRoutes = require('./modules/referrals/referral.routes');
@@ -36,6 +38,13 @@ function createApp() {
   );
 
   app.use('/auth', authRoutes);
+  // Phone routes first so /users/:id/phones isn't swallowed by the /users router
+  app.use('/users/:ownerId/phones', phoneRouter('USER'));
+  app.use('/patients/:ownerId/phones', phoneRouter('PATIENT', {
+    beforeAdd: (patientId) => patientsService.assertActive(patientId),
+  }));
+  app.use('/shops/:ownerId/phones', phoneRouter('SHOP'));
+
   app.use('/users', userRoutes);
   app.use('/doctors', doctorRoutes);
   app.use('/shops', shopRoutes);
@@ -48,7 +57,7 @@ function createApp() {
   app.use('/shops', inventoryRoutes); // Rachana: /shops/:shopId/stock-in (B4–B7)
 
   // Module routers still to land:
-  //   Commit 4 (Nov 10): /{users,patients,shops}/:id/phones, /phones/:id/verify
+  //   Commit 5 (Nov 12): /phones/:id/verify
   //   Commit 5 (Nov 12): /notifications
 
   app.use(notFound);

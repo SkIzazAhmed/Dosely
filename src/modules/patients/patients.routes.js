@@ -9,6 +9,7 @@ const { authenticate } = require('../../middleware/auth');
 const { requireRole } = require('../../middleware/rbac');
 const { idempotency } = require('../../middleware/idempotency');
 const patients = require('./patients.service');
+const { tryNormalize } = require('../phones/phone.validator');
 
 const router = express.Router();
 // Patients have no login (A8). Doctors, shop staff and admins manage them.
@@ -30,15 +31,21 @@ router.post(
   })
 );
 
-// GET /patients?search=&isActive=&mine=true&limit=&offset=
+// GET /patients?search=&phone=&isActive=&mine=true&limit=&offset=
+// phone is matched after normalisation, so "098765 43210" finds "+919876543210".
 router.get(
   '/',
   asyncHandler(async (req, res) => {
-    const { mine, ...filters } = validate(req.query, {
+    const { mine, phone, ...filters } = validate(req.query, {
       search: { type: 'string', max: 100 },
+      phone: { type: 'string', max: 30 },
       isActive: { type: 'boolean' },
       mine: { type: 'boolean' },
     });
+    if (phone !== undefined) {
+      filters.phone = tryNormalize(phone);
+      if (!filters.phone) throw new AppError('PHONE_INVALID_FORMAT', undefined, { input: phone });
+    }
     res.json(await patients.list({ ...filters, createdBy: mine ? req.user.id : undefined, ...pagination(req.query) }));
   })
 );

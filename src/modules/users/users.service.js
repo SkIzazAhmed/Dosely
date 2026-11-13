@@ -57,6 +57,12 @@ async function findForLogin(email) {
   return rows[0] || null;
 }
 
+/** Internal: includes password_hash. Only auth uses this (phone login). */
+async function findForLoginById(id) {
+  const { rows } = await query(`SELECT ${COLUMNS}, password_hash FROM users WHERE id = $1`, [id]);
+  return rows[0] || null;
+}
+
 async function recordLogin(id) {
   await query('UPDATE users SET last_login_at = now() WHERE id = $1', [id]);
 }
@@ -114,4 +120,4 @@ async function setActive(id, isActive, { client } = {}) {
   return toPublic(rows[0]);
 }
 
-module.exports = { toPublic, create, getById, getByIdOrThrow, findForLogin, recordLogin, list, update, setActive };
+module.exports = { toPublic, create, getById, getByIdOrThrow, findForLogin, findForLoginById, recordLogin, list, update, setActive };

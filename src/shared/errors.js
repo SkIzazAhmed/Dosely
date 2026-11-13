@@ -51,13 +51,16 @@ const ErrorCodes = Object.freeze({
   PATIENT_INACTIVE: { status: 409, message: 'Patient is deactivated' },
 
   // Phones (A9, rules P1–P13, edge cases 4/9/10)
-  PHONE_INVALID: { status: 400, message: 'Phone number is not valid' },
-  PHONE_DUPLICATE: { status: 409, message: 'Phone number already exists for this owner' },
-  PHONE_LIMIT_REACHED: { status: 409, message: 'An owner can have at most 5 phone numbers' },
-  PHONE_OWNER_INVALID: { status: 400, message: 'A phone number must have exactly one owner' },
-  PHONE_PRIMARY_REQUIRED: { status: 409, message: 'Owner must keep one primary phone number' },
-  PHONE_UNVERIFIED: { status: 409, message: 'Phone number is not verified' },
-  PHONE_UNREACHABLE: { status: 409, message: 'Phone number is marked unreachable' },
+  // Phone rules P1–P13 (codes from the main PRD)
+  PHONE_INVALID_FORMAT: { status: 422, message: 'Phone number is not a valid number' },                 // P2
+  PHONE_NOT_MOBILE: { status: 422, message: 'Not a mobile number; landlines must be labelled HOME, WORK or SHOP' }, // P3
+  PHONE_DUPLICATE_FOR_OWNER: { status: 409, message: 'This number is already saved for this owner' },   // P4
+  PHONE_TAKEN: { status: 409, message: 'This number is already verified for another user' },            // P6
+  PHONE_LIMIT: { status: 422, message: 'An owner can have at most 5 active phone numbers' },            // P7
+  PHONE_PRIMARY_REQUIRED: { status: 409, message: 'Choose another primary number first' },               // P10
+  PHONE_NOT_VERIFIED: { status: 422, message: 'Phone number is not verified' },                          // P11
+  PHONE_OWNER_INVALID: { status: 400, message: 'A phone number must have exactly one owner' },          // F5.1
+  PHONE_UNREACHABLE: { status: 409, message: 'Phone number is marked unreachable' },                     // P13
   PATIENT_NO_PHONE: { status: 409, message: 'Patient has no usable phone number' },
 
   // Notifications (A10, A11)
