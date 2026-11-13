@@ -10,8 +10,13 @@ const { withTransaction } = require('../../db/transaction');
 const { AppError, fromPgError } = require('../../shared/errors');
 const doctors = require('../doctors/doctors.service');
 const stock = require('../inventory/stock.service');
+const availability = require('../inventory/availability.service');
+const notifications = require('../notifications/notification.service');
 const shopAccess = require('./shopAccess');
 const state = require('./request.state');
+
+const S_ACK = 'ACKNOWLEDGED';
+const S_PARTIAL = 'PARTIALLY_FULFILLED';
 const referralState = require('../referrals/referral.state');
 const { URGENCY_HOURS, SELECT, STATUS_ORDER, toPublic, groupByPrescription } = require('./request.model');
 
@@ -77,11 +82,47 @@ async function create(doctorUserId, input) {
           input.quantity, available, urgency, input.doctorNote ?? null, URGENCY_HOURS[urgency],
         ]
       );
-      return getById(id, { client });
+      const request = await getById(id, { client });
+
+      // C6: the shop's notification carries the top 3 other shops that can
+      // cover what this shop can't (requested − available here).
+      const alternatives = await availability.lookup(
+        { medicineId: input.medicineId, minQty: input.quantity - available, nearShopId: input.shopId, limit: 3 },
+        { client }
+      );
+      await notifyRequestCreated(request, alternatives, client);
+      return { ...request, alternatives };
     } catch (err) {
-      throw fromPgError(err);
+      throw err instanceof AppError ? err : fromPgError(err);
     }
   });
+}
+
+const altSummary = (a) => ({
+  shopId: a.shop.id, name: a.shop.name, area: a.shop.area, pincode: a.shop.pincode,
+  available: a.available, distanceKm: a.distanceKm,
+});
+
+const medName = (m) => [m.brandName, m.strength].filter(Boolean).join(' ');
+
+async function notifyRequestCreated(request, alternatives, client) {
+  const urgent = request.urgency === 'URGENT' ? 'URGENT ' : '';
+  await notifications.notifyShop(
+    request.shopId,
+    {
+      channels: ['IN_APP'],
+      type: 'REQUEST_CREATED',
+      title: `${urgent}Stock request ${request.requestNo}`,
+      body: `${request.doctor.fullName} needs ${request.requestedQty} × ${medName(request.medicine)}` +
+        ` (you have ${request.availableQtySnapshot}).`,
+      data: {
+        requestId: request.id, requestNo: request.requestNo, urgency: request.urgency,
+        expiresAt: request.expiresAt, alternatives: alternatives.map(altSummary),
+      },
+      dedupeKey: `request-created:${request.id}`,
+    },
+    { client }
+  );
 }
 
 async function list(where, params, order, { status, limit = 20, offset = 0 }) {
@@ -187,6 +228,57 @@ async function acknowledge(user, id) {
   return getById(id);
 }
 
+/**
+ * C5 / edge case 2: the origin shop dispenses against a request through
+ * stock.service. A partial dispense moves the request to PARTIALLY_FULFILLED;
+ * the last units move it to FULFILLED. Allowed from ACKNOWLEDGED and
+ * PARTIALLY_FULFILLED; never more than is still unfulfilled.
+ *
+ * @param {string} idempotencyKey  the route's Idempotency-Key; passed to stock.dispense
+ */
+async function dispense(user, id, quantity, idempotencyKey) {
+  return withTransaction(async (client) => {
+    const request = await getByIdOrThrow(id, { client, forUpdate: true });
+    const actor = await actAs(user, request, 'SHOP', { client });
+
+    if (![S_ACK, S_PARTIAL].includes(request.status)) {
+      // dispensing is only for a request the shop has acknowledged
+      state.assertTransition(request.status, S_PARTIAL, actor, { request });
+      throw new AppError('INVALID_TRANSITION', `Cannot dispense against a ${request.status} request`, {
+        entity: 'stock_request', from: request.status, to: S_PARTIAL, actor, reason: 'not open for dispensing',
+      });
+    }
+    if (quantity > request.unfulfilledQty) {
+      throw AppError.validation([{ field: 'quantity', issue: `must be at most ${request.unfulfilledQty} (still unfulfilled)` }]);
+    }
+
+    const fulfilledQty = request.fulfilledQty + quantity;
+    const to = fulfilledQty === request.requestedQty ? 'FULFILLED' : S_PARTIAL;
+    if (to !== request.status) state.assertTransition(request.status, to, actor, { request, fulfilledQty });
+
+    const result = await stock.dispense(
+      {
+        shopId: request.shopId,
+        medicineId: request.medicine.id,
+        quantity,
+        performedBy: user.id,
+        requestId: request.id,
+        idempotencyKey: `request:${request.id}:dispense:${idempotencyKey}`,
+      },
+      { client }
+    );
+
+    await client.query(
+      `UPDATE stock_requests
+          SET fulfilled_qty = $2, status = $3::request_status,
+              fulfilled_at = CASE WHEN $3::request_status = 'FULFILLED' THEN now() END
+        WHERE id = $1`,
+      [id, fulfilledQty, to]
+    );
+    return { ...(await getById(id, { client })), dispensed: { quantity, lines: result.lines } };
+  });
+}
+
 /** C5: the shop closes an open request with a reason. */
 async function close(user, id, reason) {
   return withTransaction(async (client) => {
@@ -247,6 +339,7 @@ async function cancel(user, id, reason = null) {
 
 module.exports = {
   acknowledge,
+  dispense,
   close,
   cancel,
   liveReferralCount,

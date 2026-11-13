@@ -76,6 +76,17 @@ router.post(
   })
 );
 
+// POST /requests/:id/dispense { quantity } — shop staff; Idempotency-Key required (stock.dispense needs it)
+router.post(
+  '/:id/dispense',
+  idempotency(),
+  asyncHandler(async (req, res) => {
+    const reqId = idParam(req.params.id, 'Request');
+    const body = validate(req.body, { quantity: { type: 'integer', min: 1, max: 10000, required: true } });
+    res.json(await requests.dispense(req.user, reqId, body.quantity, req.get('Idempotency-Key')));
+  })
+);
+
 // POST /requests/:id/close { reason } — shop staff (C5)
 router.post(
   '/:id/close',

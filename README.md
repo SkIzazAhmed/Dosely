@@ -353,6 +353,8 @@ one `{ from, to, actor, guard }` table each. Any other move throws `409 INVALID_
 | GET /requests?shopId= | shop staff, ADMIN | shop inbox, open statuses first |
 | GET /requests/:id | sender, shop staff, ADMIN | one request |
 | POST /requests/:id/acknowledge | shop staff, ADMIN | only from `SENT`, before expiry |
+| POST /requests/:id/dispense | shop staff, ADMIN | `{ quantity }`, Idempotency-Key required; from `ACKNOWLEDGED`/`PARTIALLY_FULFILLED`, at most the unfulfilled qty; partial → `PARTIALLY_FULFILLED`, last units → `FULFILLED` |
+| GET /inventory/availability | any logged-in user | `?medicine_id&min_qty[&near_shop_id][&limit]` — shops with ≥ min_qty non-expired, unreserved units, ranked by distance from `near_shop_id`, then same pincode, then same area |
 | POST /requests/:id/close | shop staff, ADMIN | `{ reason }` (1–500 chars, else `400 CLOSE_REASON_REQUIRED`); from `ACKNOWLEDGED` or `PARTIALLY_FULFILLED` |
 | POST /requests/:id/cancel | sending doctor, ADMIN | `{ reason? }`; cancels live referrals and releases held stock |
 
@@ -361,6 +363,13 @@ requests sharing a prescription come back as one group. `ROUTINE` requests expir
 Any status change the state machine doesn't allow (wrong status, or a failing guard such as "request has
 expired") is `409 INVALID_TRANSITION` with `details: { from, to, actor, reason }`. Acknowledge is a
 conditional update, so it can't race the expiry job. The action routes accept an optional `Idempotency-Key`.
+
+A new request's `REQUEST_CREATED` notification (and the 201 body, as `alternatives`) lists the top 3 other
+shops that can cover the shortfall (requested − available at the shop).
+
+`POST /requests/:id/dispense` calls `stock.dispense` exactly as the stock.service contract says. Until
+Rachana's real `dispense` lands it is her in-memory stub, which can't see real stock, so the API tests swap in a
+recording stand-in for that one function.
 
 Until Izaz's `shops` / `shop_staff` tables land, `src/modules/requests/shopAccess.js` runs as a stub
 (any shop id is active, any SHOPKEEPER is staff of every shop) and switches to the real checks by itself.
@@ -372,7 +381,7 @@ Until Izaz's `shops` / `shop_staff` tables land, `src/modules/requests/shopAcces
 | 1 | Tue Nov 4 | Migrations for stock_requests and referrals; request.state.js transition table ✅ |
 | 2 | Thu Nov 6 | Create request (snapshot, number, urgency, expiry), doctor list, shop inbox (C1–C3) ✅ |
 | 3 | Sat Nov 8 | Guards for every transition; acknowledge, close, cancel routes; state machine tests (C4, C5) ✅ |
-| 4 | Mon Nov 10 | Availability lookup with ranking; dispense against a request (C6) |
+| 4 | Mon Nov 10 | Availability lookup with ranking; dispense against a request (C6) ✅ |
 | 5 | Wed Nov 12 | Referrals: create, accept with hold, reject, cancel (C7, C8) |
 | 6 | Fri Nov 14 | Pickup verification, patient SMS batching + slip, expiry jobs, 2-hour reminder (C9–C11) |
 | 7 | Sun Nov 16 | Referral flow integration test, edge cases 1, 2, 7, 8, 11, 12, 13, 16; merge to main |

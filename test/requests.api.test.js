@@ -365,3 +365,111 @@ t('edge case 11: cancel after a referral was accepted releases the held stock', 
   assert.equal(after.status, 'CANCELLED');
   assert.equal((await stock.getAvailable(ctx.medicineId, { shopIds: [target] }))[0].available, 5);
 });
+
+// ---------------------------------------------------------------------------
+// Commit 4: top-3 alternatives (C6) and dispense against a request (edge case 2)
+// stock.dispense is still Rachana's in-memory stub (it can't see real stock),
+// so these tests swap in a recording stand-in with the same signature.
+// ---------------------------------------------------------------------------
+
+function fakeDispense() {
+  const calls = [];
+  const real = stock.dispense;
+  stock.dispense = async (input) => {
+    calls.push(input);
+    return {
+      shopId: input.shopId, medicineId: input.medicineId, quantity: input.quantity, replayed: false,
+      lines: [{ batchId: 1, batchNo: 'FAKE', expiryDate: '2099-12-31', quantity: input.quantity, movementId: calls.length, balanceAfter: 0 }],
+    };
+  };
+  return { calls, restore: () => { stock.dispense = real; } };
+}
+
+t('C6: a new request carries the top 3 shops that can cover the shortfall', async () => {
+  const others = [await newShop(), await newShop(), await newShop(), await newShop()];
+  for (const s of others) await putStock(s, ctx.medicineId, 50);
+  const r = await send({ quantity: 10 }); // origin has 3 → shortfall 7
+  assert.equal(r.status, 201);
+  assert.equal(r.body.alternatives.length, 3);
+  assert.ok(r.body.alternatives.every((a) => a.available >= 7 && a.shop.id !== ctx.shopId));
+});
+
+t('edge case 2: partial dispense → PARTIALLY_FULFILLED, the rest → FULFILLED', async () => {
+  const fake = fakeDispense();
+  try {
+    const r = await send({ quantity: 10 });
+    await act(r.body.id, 'acknowledge', tok.shop);
+
+    const d1 = await act(r.body.id, 'dispense', tok.shop, { quantity: 3 });
+    assert.equal(d1.status, 200, JSON.stringify(d1.body));
+    assert.equal(d1.body.status, 'PARTIALLY_FULFILLED');
+    assert.equal(d1.body.fulfilledQty, 3);
+    assert.equal(d1.body.unfulfilledQty, 7);
+    assert.equal(fake.calls[0].shopId, ctx.shopId);
+    assert.equal(fake.calls[0].requestId, r.body.id);
+    assert.equal(fake.calls[0].quantity, 3);
+    assert.match(fake.calls[0].idempotencyKey, new RegExp(`^request:${r.body.id}:dispense:`));
+
+    const d2 = await act(r.body.id, 'dispense', tok.shop, { quantity: 4 });
+    assert.equal(d2.body.status, 'PARTIALLY_FULFILLED');
+    assert.equal(d2.body.fulfilledQty, 7);
+
+    const over = await act(r.body.id, 'dispense', tok.shop, { quantity: 4 });
+    assert.equal(over.status, 400);
+
+    const d3 = await act(r.body.id, 'dispense', tok.shop, { quantity: 3 });
+    assert.equal(d3.body.status, 'FULFILLED');
+    assert.ok(d3.body.fulfilledAt);
+
+    const after = await act(r.body.id, 'dispense', tok.shop, { quantity: 1 });
+    assert.equal(after.status, 409);
+    assert.equal(after.body.error.code, 'INVALID_TRANSITION');
+  } finally {
+    fake.restore();
+  }
+});
+
+t('dispense: only after acknowledge, only shop staff, needs an Idempotency-Key; replay does not dispense twice', async () => {
+  const fake = fakeDispense();
+  try {
+    const r = await send({ quantity: 10 });
+    const early = await act(r.body.id, 'dispense', tok.shop, { quantity: 1 });
+    assert.equal(early.status, 409);
+    await act(r.body.id, 'acknowledge', tok.shop);
+    assert.equal((await act(r.body.id, 'dispense', tok.doctor, { quantity: 1 })).status, 403);
+
+    const noKey = await api('POST', `/requests/${r.body.id}/dispense`, { token: tok.shop, body: { quantity: 1 }, key: '' });
+    assert.equal(noKey.status, 400);
+    assert.equal(noKey.body.error.code, 'IDEMPOTENCY_KEY_REQUIRED');
+
+    const key = crypto.randomUUID();
+    const a = await api('POST', `/requests/${r.body.id}/dispense`, { token: tok.shop, body: { quantity: 2 }, key });
+    const b = await api('POST', `/requests/${r.body.id}/dispense`, { token: tok.shop, body: { quantity: 2 }, key });
+    assert.equal(a.body.fulfilledQty, 2);
+    assert.equal(b.headers.get('idempotent-replayed'), 'true');
+    assert.equal(fake.calls.length, 1);
+    assert.equal((await api('GET', `/requests/${r.body.id}`, { token: tok.shop })).body.fulfilledQty, 2);
+  } finally {
+    fake.restore();
+  }
+});
+
+t('dispense: stock.service errors pass through and nothing changes', async () => {
+  const r = await send({ quantity: 10 });
+  await act(r.body.id, 'acknowledge', tok.shop);
+  const real = stock.dispense;
+  stock.dispense = async () => {
+    const { AppError } = require('../src/shared/errors');
+    throw new AppError('INSUFFICIENT_STOCK', undefined, { available: 0 });
+  };
+  try {
+    const d = await act(r.body.id, 'dispense', tok.shop, { quantity: 2 });
+    assert.equal(d.status, 409);
+    assert.equal(d.body.error.code, 'INSUFFICIENT_STOCK');
+    const now = await api('GET', `/requests/${r.body.id}`, { token: tok.shop });
+    assert.equal(now.body.status, 'ACKNOWLEDGED');
+    assert.equal(now.body.fulfilledQty, 0);
+  } finally {
+    stock.dispense = real;
+  }
+});
