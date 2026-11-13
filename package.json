@@ -1,6 +1,6 @@
 {
   "name": "dosely",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Dosely \u2014 ApDe Project pharmacy module MVP (Express + PostgreSQL)",
   "main": "src/server.js",
   "private": true,
@@ -14,7 +14,8 @@
     "migrate:status": "node src/db/migrate.js status",
     "seed": "node src/db/seed.js",
     "db:setup": "npm run migrate && npm run seed",
-    "test": "node --test --test-concurrency=1 \"test/**/*.test.js\""
+    "test": "node --test --test-concurrency=1 \"test/**/*.test.js\"",
+    "jobs:notifications": "node src/jobs/retryNotifications.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

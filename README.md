@@ -23,6 +23,7 @@ npm start                       # http://localhost:3000/health
 | `npm run migrate` | apply pending migrations |
 | `npm run migrate:status` | list applied `[x]` and pending `[ ]` migrations |
 | `npm run seed` | run `src/db/seeds/*.js` (idempotent) |
+| `npm run jobs:notifications` | run the SMS/email delivery job on its own (`-- --once` for one pass); the API runs it too unless `NOTIFY_WORKER=off` |
 | `npm test` | unit + DB tests (DB tests skip if Postgres isn't reachable; they add users with random emails) |
 
 ## Layout
@@ -266,6 +267,21 @@ Returns `{ deduped, notifications: [{ id, channel, recipientUserId, status, phon
 - **Inbox routes:** `GET /notifications?unreadOnly=&limit=&before=` → `{ items, unreadCount, nextBefore }`,
   `POST /notifications/:id/read`, `POST /notifications/read-all`.
 
+## SMS and email delivery (A11)
+
+`PENDING` SMS / EMAIL rows are sent by the **retryNotifications** job, which runs inside `npm start` every 5 s
+(or on its own with `npm run jobs:notifications`). In development both channels are **stubs**: messages are printed
+to the console (`[SMS stub] → +9198… : …`) instead of being sent.
+
+- **SMS** go to the verified mobile picked when the notification was created; bodies over 160 characters are refused.
+- **Retries:** a failed send is retried after 30 s, 1 min, 2 min, 4 min; after **5 attempts** the row is `FAILED`
+  (`last_error` says why). Settings: `NOTIFY_BACKOFF_BASE_MS`, `NOTIFY_WORKER_INTERVAL_MS`.
+- **Unreachable (P13):** the 3rd failed SMS in a row marks the number `UNREACHABLE` and alerts the shop / doctor.
+  A message already queued keeps its remaining attempts; **new** messages skip that number until someone re-verifies it.
+- A queued SMS whose number was removed, or whose digits were changed (P12), is `SKIPPED`, never sent to the wrong number.
+- Several workers can run at once — rows are claimed with `FOR UPDATE SKIP LOCKED`, so nothing is sent twice.
+- Try failures by hand: `NOTIFY_STUB_FAIL=+919810000101` in `.env` makes the stub fail that number.
+
 ## Phone verification and delivery rules (P11–P13)
 
 | Rule | What happens | Error |
@@ -443,5 +459,5 @@ Until Izaz's `shops` / `shop_staff` tables land, `src/modules/requests/shopAcces
 | 3 | Sat Nov 8 | Shops, shop staff, patients + seed data ✅ |
 | 4 | Mon Nov 10 | Phone numbers, validator, CRUD, rules P1–P10 ✅ |
 | 5 | Wed Nov 12 | Rules P11–P13, verify route, real notification.service + inbox ✅ |
-| 6 | Fri Nov 14 | SMS/email channels, retries with backoff, unreachable after 3 failures |
+| 6 | Fri Nov 14 | SMS/email channels, retries with backoff, unreachable after 3 failures ✅ |
 | 7 | Sun Nov 16 | Edge-case tests 4, 9, 10, fixes, README, merge to main |

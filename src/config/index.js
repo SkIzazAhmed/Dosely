@@ -32,6 +32,15 @@ const config = Object.freeze({
 
   notifications: Object.freeze({
     smsProvider: process.env.SMS_PROVIDER || 'stub',
+    emailProvider: process.env.EMAIL_PROVIDER || 'stub',
+    // Stub only: comma-separated numbers / emails that always fail, to try retries and P13 by hand
+    stubFail: (process.env.NOTIFY_STUB_FAIL || '').split(',').map((x) => x.trim()).filter(Boolean),
+    // Retry backoff: base * 2^(attempt-1), capped (A11, F6.3)
+    backoffBaseMs: int('NOTIFY_BACKOFF_BASE_MS', 30_000),
+    backoffMaxMs: int('NOTIFY_BACKOFF_MAX_MS', 30 * 60_000),
+    // retryNotifications job inside the API process; set NOTIFY_WORKER=off to run it separately
+    worker: (process.env.NOTIFY_WORKER || 'on') !== 'off',
+    workerIntervalMs: int('NOTIFY_WORKER_INTERVAL_MS', 5_000),
   }),
 });
 
