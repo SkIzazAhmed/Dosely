@@ -7,7 +7,7 @@
  *
  * Real: stockIn, getAvailable, reserve, release. stock.dispense is still
  * Rachana's in-memory stub, so a recording stand-in is swapped in for it.
- * Patient phones (Izaz) aren't on main: patientPhone's stub is used.
+ * Patient phones are real (Izaz, phones.service): tests add verified numbers.
  */
 
 const test = require('node:test');
@@ -21,7 +21,7 @@ const notifications = require('../src/modules/notifications/notification.service
 const requests = require('../src/modules/requests/request.service');
 const referrals = require('../src/modules/referrals/referral.service');
 const messages = require('../src/modules/referrals/referral.messages');
-const patientPhone = require('../src/modules/referrals/patientPhone');
+const phones = require('../src/modules/phones/phones.service');
 const jobs = require('../src/jobs');
 const { hashPassword } = require('../src/shared/password');
 const { createApp } = require('../src/app');
@@ -84,9 +84,10 @@ async function putStock(shopId, quantity) {
 const availableAt = async (shopId) =>
   (await stock.getAvailable(ctx.medicineId, { shopIds: [shopId] })).reduce((n, r) => n + r.available, 0);
 
-async function newPatient(phone) {
+/** A patient with `phone` as a verified mobile (or unverified with verified: false, or none). */
+async function newPatient(phone, { verified = true } = {}) {
   const { rows: [p] } = await pool.query(`INSERT INTO patients (full_name) VALUES ($1) RETURNING id`, [`Patient ${uniq()}`]);
-  patientPhone._setStubPhone(p.id, phone || null);
+  if (phone) await phones.add('PATIENT', p.id, { number: phone }, { verified, verifiedBy: verified ? ctx.origin.id : null });
   return p.id;
 }
 
@@ -248,6 +249,14 @@ t('C9: a slip patient (no usable phone) is verified by request number alone', as
   const r = await fulfil(ref.id, { requestNo: req.requestNo });
   assert.equal(r.status, 200, JSON.stringify(r.body));
   assert.equal(r.body.request.status, 'FULFILLED');
+});
+
+t('C9 / C10 edge case 9: an unverified number is not usable — slip, and request number alone', async () => {
+  const shop = await targetShop();
+  const req = await newRequest({ quantity: 2, patientId: await newPatient('9845033333', { verified: false }) });
+  const ref = await acceptedReferral(req, shop, 2);
+  assert.equal(ref.patientContact.method, 'SLIP');
+  assert.equal((await fulfil(ref.id, { requestNo: req.requestNo })).status, 200);
 });
 
 t('C9: picking up part of a request — PARTIALLY_FULFILLED when nothing else is live, REFERRED while another is', async () => {

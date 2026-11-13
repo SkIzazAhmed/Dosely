@@ -3,31 +3,36 @@
 /**
  * Patient phone lookup for referrals (C9 verification, C10 SMS vs slip).
  *
- * Phones are Izaz's module (Commit 4, not on main yet). When
- * src/modules/phones/phones.service.js exists and exports
- * getPrimaryUsablePhone(patientId, { client }) → { number } | null, it is used.
- * Until then this is a STUB: no patient has a usable phone (so every
- * accepted referral gets a printed slip), unless a test sets one with
- * _setStubPhone(patientId, '+919812345678').
+ * Uses Izaz's phones.service (Commit 4): the patient's usable phone is the
+ * primary number if it is SMS-capable (verified mobile, active), otherwise the
+ * first other SMS-capable number. An unverified number (edge case 9) or no
+ * number at all (edge case 10) means no usable phone → printed slip.
+ *
+ * If phones.service isn't there (older checkout), it falls back to a stub where
+ * no patient has a usable phone unless _setStubPhone() set one.
  */
 
 let phones = null;
 try {
   // eslint-disable-next-line global-require
   phones = require('../phones/phones.service');
-  if (typeof phones.getPrimaryUsablePhone !== 'function') phones = null;
+  if (typeof phones.list !== 'function') phones = null;
 } catch {
   phones = null;
 }
 
 const stubPhones = new Map();
 
-/** @returns {Promise<{number:string}|null>} the patient's primary usable phone, or null */
+/** @returns {Promise<{number:string, phoneId?:number}|null>} the patient's usable phone, or null */
 async function getUsablePhone(patientId, { client } = {}) {
   if (!patientId) return null;
-  if (phones) return phones.getPrimaryUsablePhone(patientId, { client });
-  const number = stubPhones.get(Number(patientId));
-  return number ? { number } : null;
+  if (!phones) {
+    const number = stubPhones.get(Number(patientId));
+    return number ? { number } : null;
+  }
+  const list = await phones.list('PATIENT', patientId, { client });
+  const usable = list.find((p) => p.isPrimary && p.smsCapable) || list.find((p) => p.smsCapable);
+  return usable ? { number: usable.e164, phoneId: usable.id } : null;
 }
 
 /** Last 5 digits of a phone number ('' when it has fewer). */

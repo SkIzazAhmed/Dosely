@@ -439,9 +439,10 @@ origin shops get in-app notifications for sent, accepted, rejected and cancelled
   `src/server.js` starts them unless `JOBS_DISABLED=true`; each run holds a PostgreSQL advisory lock, so only
   one instance runs a job at a time. `npm run jobs:once` runs them all once.
 
-Still on stubs: `stock.dispense` (Rachana) and the SMS channel and patient phones (Izaz).
-`src/modules/referrals/patientPhone.js` uses `phones.service.getPrimaryUsablePhone` as soon as it exists;
-until then no patient has a usable phone, so every accepted referral gets a slip.
+A patient's usable phone (`src/modules/referrals/patientPhone.js`, on Izaz's `phones.service`) is their primary
+number if it is SMS-capable (verified mobile), else their first other SMS-capable number. An unverified number
+(edge case 9) or no number (edge case 10) means a slip. Still on stubs: `stock.dispense` (Rachana) and the
+SMS channel (Izaz).
 
 ### Commit plan (Anushka)
 
