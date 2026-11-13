@@ -64,13 +64,17 @@ async function assertActive(id, { client } = {}) {
   return p;
 }
 
-async function list({ search, isActive, createdBy, limit = 20, offset = 0 } = {}) {
+async function list({ search, phone, isActive, createdBy, limit = 20, offset = 0 } = {}) {
   const where = [];
   const params = [];
   if (isActive !== undefined) { params.push(isActive); where.push(`is_active = $${params.length}`); }
   if (createdBy) { params.push(createdBy); where.push(`created_by = $${params.length}`); }
   if (search) { params.push(`%${search}%`); where.push(`full_name ILIKE $${params.length}`); }
-  // Phone-number search is added with the phones module (Commit 4).
+  if (phone) {
+    // phone is already normalised to E.164 by the route (edge case 4: compare after normalisation)
+    params.push(phone);
+    where.push(`EXISTS (SELECT 1 FROM phone_numbers ph WHERE ph.owner_type = 'PATIENT' AND ph.patient_id = patients.id AND ph.e164 = $${params.length} AND ph.is_active)`);
+  }
   const w = where.length ? `WHERE ${where.join(' AND ')}` : '';
   const { rows: [{ total }] } = await query(`SELECT count(*)::int AS total FROM patients ${w}`, params);
   params.push(limit, offset);

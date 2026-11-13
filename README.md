@@ -84,7 +84,7 @@ All routes except `POST /auth/login` need `Authorization: Bearer <token>`.
 
 | Method & path | Who | What |
 | --- | --- | --- |
-| POST /auth/login | anyone | `{ email, password }` → token + user |
+| POST /auth/login | anyone | `{ email \| phone, password }` → token + user (phone must be verified) |
 | GET /auth/me | logged in | current user (+ `doctor` profile for doctors) |
 | POST /users | ADMIN | `{ role, fullName, email?, password }` |
 | GET /users | ADMIN | `?role=&isActive=&search=&limit=&offset=` |
@@ -107,9 +107,13 @@ All routes except `POST /auth/login` need `Authorization: Bearer <token>`.
 | PATCH /shops/:shopId/staff/:userId | OWNER or ADMIN | `{ staffRole }` |
 | DELETE /shops/:shopId/staff/:userId | OWNER or ADMIN | remove; the last OWNER can't be removed or demoted |
 | POST /patients | DOCTOR, SHOPKEEPER, ADMIN | `{ fullName, dateOfBirth? (YYYY-MM-DD), gender? }` |
-| GET /patients | DOCTOR, SHOPKEEPER, ADMIN | `?search=&isActive=&mine=true&limit=&offset=` (phone search in Commit 4) |
+| GET /patients | DOCTOR, SHOPKEEPER, ADMIN | `?search=&phone=&isActive=&mine=true&limit=&offset=` — phone matched after normalising |
 | GET /patients/:id, PATCH /patients/:id | DOCTOR, SHOPKEEPER, ADMIN | responses include `age` |
 | DELETE /patients/:id | creator or ADMIN | deactivate; `POST /patients/:id/activate` (ADMIN) |
+| GET /{users,patients,shops}/:id/phones | see Phone numbers | `?includeRemoved=true`; primary first |
+| POST /{users,patients,shops}/:id/phones | see Phone numbers | `{ number, label? = MOBILE, isPrimary? }` → phone + `warnings` |
+| PATCH /{users,patients,shops}/:id/phones/:phoneId | see Phone numbers | `{ label?, isPrimary? }` |
+| DELETE /{users,patients,shops}/:id/phones/:phoneId | see Phone numbers | deactivate |
 
 ### Using auth in your module (Rachana, Anushka)
 
@@ -138,6 +142,35 @@ await shops.assertCanReceiveRequests(shopId);   // throws NOT_FOUND / SHOP_INACT
 await patients.assertActive(patientId);          // throws NOT_FOUND / PATIENT_INACTIVE
 await shops.listActiveStaffUserIds(shopId);      // [userId…] active staff with active accounts (used by notification fan-out)
 await shops.listShopsForUser(userId);            // [{ shopId, staffRole }]
+```
+
+## Phone numbers (A9, rules P1–P13)
+
+Who can manage numbers: **users** — themselves or ADMIN; **patients** — DOCTOR, SHOPKEEPER, ADMIN;
+**shops** — anyone can read, the shop OWNER or ADMIN can change.
+
+| Rule | What happens | Error |
+| --- | --- | --- |
+| P1 | Spaces, dashes, dots, brackets stripped; 10 digits, leading 0 or 91 → +91 | — |
+| P2 | Must be a valid number for its country | 422 PHONE_INVALID_FORMAT |
+| P3 | Indian mobiles are +91[6-9]… **and** in a mobile range (so Bengaluru 080 landlines aren't mistaken for mobiles). Landlines only as HOME / WORK / SHOP, never SMS | 422 PHONE_NOT_MOBILE |
+| P4 | Same number twice on one owner (compared after normalising) | 409 PHONE_DUPLICATE_FOR_OWNER |
+| P5 | Same number on two patients is allowed; response has `warnings: [{ code: 'PHONE_SHARED_WITH_PATIENT', patients: ['P**** N***'] }]` | 201 + warning |
+| P6 | A verified number belongs to one user only (it's a login) | 409 PHONE_TAKEN |
+| P7 | At most 5 active numbers per owner | 422 PHONE_LIMIT |
+| P8 | First number becomes primary | — |
+| P9 | New primary unsets the old one in the same transaction | — |
+| P10 | Primary can't be removed while others exist | 409 PHONE_PRIMARY_REQUIRED |
+
+Demo numbers (seed 003): users `+91 99000 0000{1–5}` (doctor@, shopkeeper@, staff@, owner.kor@, owner.ind@ — all verified,
+so `POST /auth/login { "phone": "9900000001", "password": "Dosely@123" }` works); Jayanagar shop landline `+91 80 2663 0000`;
+Priya Nair and Rohan Das share `+91 98100 00102` (P5); Sam Thomas has only an **unverified** number (edge case 9);
+Meera Pillai has **no phone** (edge case 10).
+
+```js
+const { normalizePhone, tryNormalize } = require('../phones/phone.validator');
+normalizePhone('098765 43210');   // { e164: '+919876543210', kind: 'MOBILE', label: 'MOBILE', smsCapable: true, … }
+tryNormalize('bad');              // null instead of throwing
 ```
 
 DATE columns come back from the database as `'YYYY-MM-DD'` strings (not JS Dates), e.g. `dateOfBirth`, `expiryDate`.
@@ -384,7 +417,7 @@ Until Izaz's `shops` / `shop_staff` tables land, `src/modules/requests/shopAcces
 | 1 | Tue Nov 4 | Scaffold, migration 001 (enums + conventions), error codes, notification stubs ✅ |
 | 2 | Thu Nov 6 | Users, bcrypt, JWT login, rbac + idempotency middleware, doctors ✅ |
 | 3 | Sat Nov 8 | Shops, shop staff, patients + seed data ✅ |
-| 4 | Mon Nov 10 | Phone numbers, validator, CRUD, rules P1–P10 |
+| 4 | Mon Nov 10 | Phone numbers, validator, CRUD, rules P1–P10 ✅ |
 | 5 | Wed Nov 12 | Rules P11–P13, verify route, real notification.service + inbox |
 | 6 | Fri Nov 14 | SMS/email channels, retries with backoff, unreachable after 3 failures |
 | 7 | Sun Nov 16 | Edge-case tests 4, 9, 10, fixes, README, merge to main |

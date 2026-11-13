@@ -5,12 +5,12 @@ const assert = require('node:assert/strict');
 const { AppError, fromPgError } = require('../src/shared/errors');
 
 test('AppError uses default status and message for known codes', () => {
-  const e = new AppError('PHONE_LIMIT_REACHED');
-  assert.equal(e.status, 409);
-  assert.equal(e.code, 'PHONE_LIMIT_REACHED');
+  const e = new AppError('PHONE_LIMIT');
+  assert.equal(e.status, 422);
+  assert.equal(e.code, 'PHONE_LIMIT');
   assert.deepEqual(e.toJSON(), {
-    code: 'PHONE_LIMIT_REACHED',
-    message: 'An owner can have at most 5 phone numbers',
+    code: 'PHONE_LIMIT',
+    message: 'An owner can have at most 5 active phone numbers',
     details: null,
   });
 });
