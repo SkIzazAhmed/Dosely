@@ -89,6 +89,31 @@ router.post(
   })
 );
 
+// POST /referrals/:id/fulfil { requestNo, phoneLast5? } — target shop staff (C9).
+// Idempotency-Key required: this dispenses stock.
+router.post(
+  '/:id/fulfil',
+  idempotency(),
+  asyncHandler(async (req, res) => {
+    const refId = idParam(req.params.id, 'Referral');
+    const body = validate(req.body, {
+      requestNo: { type: 'string', max: 20, required: true },
+      phoneLast5: { type: 'string', pattern: /^\d{5}$/, patternMessage: 'must be 5 digits', nullable: true },
+    });
+    res.json(await referrals.fulfil(req.user, refId, body));
+  })
+);
+
+// GET /referrals/:id/slip — printable slip for a patient without a usable phone (C10)
+router.get(
+  '/:id/slip',
+  asyncHandler(async (req, res) => {
+    const out = await referrals.slip(req.user, idParam(req.params.id, 'Referral'));
+    if ((req.get('accept') || '').includes('text/plain')) return res.type('text/plain').send(out.text);
+    res.json(out);
+  })
+);
+
 // POST /referrals/:id/cancel { reason? } — origin shop staff; releases held stock
 router.post(
   '/:id/cancel',

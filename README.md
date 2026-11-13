@@ -385,11 +385,30 @@ Until Izaz's `shops` / `shop_staff` tables land, `src/modules/requests/shopAcces
 | POST /referrals/:id/accept | target shop staff | reserves the units through `stock.reserve` and holds them for `REFERRAL_HOLD_HOURS` (default 24) |
 | POST /referrals/:id/reject | target shop staff | `{ reason }` required (`400 REJECT_REASON_REQUIRED`) |
 | POST /referrals/:id/cancel | origin shop staff | `{ reason? }`; releases held stock through `stock.release` |
+| POST /referrals/:id/fulfil | target shop staff | `{ requestNo, phoneLast5? }`, Idempotency-Key required. Request number + last 5 digits of the patient's phone (request number alone for a slip patient), else `403 REFERRAL_VERIFICATION_FAILED`; dispenses the held units and raises the request's fulfilled qty |
+| GET /referrals/:id/slip | origin or target staff | printable slip (shop name, address, request no.); `Accept: text/plain` for plain text |
 
 Limits (C7): at most 3 referrals per request (`REFERRAL_LIMIT_REACHED`), one live referral per target shop
 (`REFERRAL_DUPLICATE`), live referred quantity ≤ unfulfilled (`REFERRAL_QTY_EXCEEDED`). When a request's last
 live referral ends it steps back to `PARTIALLY_FULFILLED` (something dispensed) or `ACKNOWLEDGED`. Target and
 origin shops get in-app notifications for sent, accepted, rejected and cancelled referrals.
+
+### Patient messages and jobs
+
+- **C10:** when a referral is accepted and the patient has a usable phone, a message is queued; one SMS per
+  patient and prescription goes out 10 minutes after the first one was queued, so referrals accepted within
+  that window share one SMS (≤ 160 chars). No usable phone, or no patient on the request → the accept
+  response carries a printable slip (`patientContact.method = 'SLIP'`). Table `patient_referral_messages`
+  (migration 022).
+- **C11:** `src/jobs/` — `expireRequests` (SENT past expiry → EXPIRED, doctor told), `expireReferralHolds`
+  (ACCEPTED past hold → NO_SHOW, stock released, request steps back), `remindPendingReferrals` (PENDING for
+  2 h → one reminder to the origin shop), all every 5 min, and `sendPatientReferralSms` every minute.
+  `src/server.js` starts them unless `JOBS_DISABLED=true`; each run holds a PostgreSQL advisory lock, so only
+  one instance runs a job at a time. `npm run jobs:once` runs them all once.
+
+Still on stubs: `stock.dispense` (Rachana) and the SMS channel and patient phones (Izaz).
+`src/modules/referrals/patientPhone.js` uses `phones.service.getPrimaryUsablePhone` as soon as it exists;
+until then no patient has a usable phone, so every accepted referral gets a slip.
 
 ### Commit plan (Anushka)
 
@@ -400,7 +419,7 @@ origin shops get in-app notifications for sent, accepted, rejected and cancelled
 | 3 | Sat Nov 8 | Guards for every transition; acknowledge, close, cancel routes; state machine tests (C4, C5) ✅ |
 | 4 | Mon Nov 10 | Availability lookup with ranking; dispense against a request (C6) ✅ |
 | 5 | Wed Nov 12 | Referrals: create, accept with hold, reject, cancel (C7, C8) ✅ |
-| 6 | Fri Nov 14 | Pickup verification, patient SMS batching + slip, expiry jobs, 2-hour reminder (C9–C11) |
+| 6 | Fri Nov 14 | Pickup verification, patient SMS batching + slip, expiry jobs, 2-hour reminder (C9–C11) ✅ |
 | 7 | Sun Nov 16 | Referral flow integration test, edge cases 1, 2, 7, 8, 11, 12, 13, 16; merge to main |
 
 ## Commit plan (Izaz)

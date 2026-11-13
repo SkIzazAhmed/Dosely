@@ -18,6 +18,8 @@ const requests = require('../requests/request.service');
 const requestState = require('../requests/request.state');
 const state = require('./referral.state');
 const { holdHours, SELECT, toPublic } = require('./referral.model');
+const messages = require('./referral.messages');
+const patientPhone = require('./patientPhone');
 
 const PG_CONSTRAINTS = { referrals_live_target_key: 'REFERRAL_DUPLICATE', referrals_shops_differ: 'REFERRAL_SAME_SHOP' };
 
@@ -211,13 +213,15 @@ async function accept(user, id) {
     );
 
     const updated = await getById(id, { client });
+    // C10: patient SMS (batched) or a printed slip — only now that it's ACCEPTED
+    const patientContact = await messages.queueForAccepted(client, updated, request);
     await notifyShop(
       row.from_shop_id, 'REFERRAL_ACCEPTED', `Referral accepted for ${request.requestNo}`,
       `${updated.toShop.name} is holding ${row.quantity} × ${medName(request.medicine)} until pickup.`,
       { referralId: id, requestId: request.id, holdUntil: updated.holdUntil },
       client
     );
-    return updated;
+    return { ...updated, patientContact };
   });
 }
 
@@ -272,7 +276,162 @@ async function cancel(user, id, reason = null) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// C9: pickup at the target shop
+// ---------------------------------------------------------------------------
+
+const norm = (v) => String(v || '').trim().toUpperCase();
+
+/**
+ * The patient collects at the target shop. Staff enter the request number and
+ * the last 5 digits of the patient's phone; a patient with no usable phone
+ * (printed slip) is verified by the request number alone. Then the held units
+ * are dispensed through stock.dispense (with the reservation lines) and the
+ * request's fulfilled quantity goes up: FULFILLED when complete, otherwise
+ * PARTIALLY_FULFILLED once no other referral is live.
+ */
+async function fulfil(user, id, { requestNo, phoneLast5 }) {
+  return withTransaction(async (client) => {
+    const { request, row, ref } = await lockForAction(client, id);
+    const actor = await actAs(user, ref, 'TARGET_SHOP', { client });
+    state.assertTransition(row.status, 'FULFILLED', actor, { referral: row, verified: true }); // table + actor
+
+    const phone = await patientPhone.getUsablePhone(request.patientId, { client });
+    const verified = norm(requestNo) === norm(request.requestNo) &&
+      (!phone || (patientPhone.last5(phone.number) !== '' && String(phoneLast5 || '').trim() === patientPhone.last5(phone.number)));
+    if (!verified) {
+      throw new AppError('REFERRAL_VERIFICATION_FAILED', undefined, { phoneRequired: Boolean(phone) });
+    }
+    state.assertTransition(row.status, 'FULFILLED', actor, { referral: row, verified });
+
+    const result = await stock.dispense(
+      {
+        shopId: row.to_shop_id,
+        medicineId: request.medicine.id,
+        quantity: row.quantity,
+        performedBy: user.id,
+        requestId: request.id,
+        referralId: id,
+        reservation: row.reservation_lines,
+        idempotencyKey: `referral:${id}:fulfil`,
+      },
+      { client }
+    );
+    await client.query(
+      `UPDATE referrals SET status = 'FULFILLED', fulfilled_at = now(), fulfilled_by = $2 WHERE id = $1`,
+      [id, user.id]
+    );
+
+    const fulfilledQty = request.fulfilledQty + row.quantity;
+    const liveReferrals = await requests.liveReferralCount(request.id, { client });
+    let to = null;
+    if (fulfilledQty === request.requestedQty) to = 'FULFILLED';
+    else if (liveReferrals === 0) to = 'PARTIALLY_FULFILLED';
+    if (to) requestState.assertTransition(request.status, to, actor, { request, fulfilledQty, liveReferrals });
+    await client.query(
+      `UPDATE stock_requests
+          SET fulfilled_qty = $2, status = COALESCE($3::request_status, status),
+              fulfilled_at = CASE WHEN $3::request_status = 'FULFILLED' THEN now() ELSE fulfilled_at END
+        WHERE id = $1`,
+      [request.id, fulfilledQty, to]
+    );
+    const req = await requests.getByIdOrThrow(request.id, { client });
+
+    await notifyShop(
+      row.from_shop_id, 'REFERRAL_FULFILLED', `Referral collected for ${request.requestNo}`,
+      `The patient collected ${row.quantity} × ${medName(request.medicine)} at ${ref.toShop.name}.`,
+      { referralId: id, requestId: request.id, requestStatus: req.status }, client
+    );
+    return {
+      ...(await getById(id, { client })),
+      dispensed: { quantity: row.quantity, lines: result.lines },
+      request: { id: req.id, status: req.status, fulfilledQty: req.fulfilledQty, unfulfilledQty: req.unfulfilledQty },
+    };
+  });
+}
+
+/** C10: printable slip for an accepted referral (origin or target staff). */
+async function slip(user, id) {
+  const ref = await getForUser(user, id);
+  if (!['ACCEPTED', 'FULFILLED'].includes(ref.status)) {
+    throw new AppError('INVALID_TRANSITION', 'A slip is only available for an accepted referral', {
+      entity: 'referral', from: ref.status, to: 'ACCEPTED', reason: 'referral is not accepted',
+    });
+  }
+  return messages.slipFor(ref);
+}
+
+// ---------------------------------------------------------------------------
+// C11: jobs
+// ---------------------------------------------------------------------------
+
+/**
+ * expireReferralHolds: every ACCEPTED referral past hold_until becomes NO_SHOW
+ * (edge case 12), its stock is released and the request steps back.
+ * @returns {Promise<{noShow:number[]}>}
+ */
+async function expireHolds() {
+  const { rows } = await query(
+    `SELECT id FROM referrals WHERE status = 'ACCEPTED' AND hold_until <= now() ORDER BY hold_until, id`
+  );
+  const noShow = [];
+  for (const { id } of rows) {
+    await withTransaction(async (client) => {
+      const { request, row } = await lockForAction(client, id);
+      if (row.status !== 'ACCEPTED' || new Date(row.hold_until) > new Date()) return; // picked up meanwhile
+      state.assertTransition('ACCEPTED', 'NO_SHOW', 'SYSTEM', { referral: row });
+      if (Array.isArray(row.reservation_lines) && row.reservation_lines.length) {
+        await stock.release(
+          { shopId: row.to_shop_id, referralId: id, lines: row.reservation_lines, performedBy: row.responded_by || row.referred_by },
+          { client }
+        );
+      }
+      await client.query(`UPDATE referrals SET status = 'NO_SHOW', no_show_at = now() WHERE id = $1`, [id]);
+      await stepBack(client, request.id, 'SYSTEM');
+      for (const shopId of [row.from_shop_id, row.to_shop_id]) {
+        await notifyShop(
+          shopId, 'REFERRAL_NO_SHOW', `No-show for ${request.requestNo}`,
+          `The patient did not collect ${row.quantity} × ${medName(request.medicine)}; the held stock was released.`,
+          { referralId: id, requestId: request.id }, client
+        );
+      }
+      noShow.push(id);
+    });
+  }
+  return { noShow };
+}
+
+/**
+ * PENDING referrals unanswered for 2 hours: remind the origin shop once (C11).
+ * @returns {Promise<{reminded:number[]}>}
+ */
+async function remindPending({ hours = 2 } = {}) {
+  return withTransaction(async (client) => {
+    const { rows } = await client.query(
+      `UPDATE referrals f SET reminder_sent_at = now()
+         FROM stock_requests r, shops ts
+        WHERE f.status = 'PENDING' AND f.reminder_sent_at IS NULL
+          AND f.created_at <= now() - make_interval(hours => $1)
+          AND r.id = f.request_id AND ts.id = f.to_shop_id
+       RETURNING f.id, f.from_shop_id, f.request_id, r.request_no, ts.name AS to_shop_name`,
+      [hours]
+    );
+    for (const r of rows) {
+      await notifyShop(
+        r.from_shop_id, 'REFERRAL_PENDING_REMINDER', `No answer yet for ${r.request_no}`,
+        `${r.to_shop_name} hasn't answered the referral for ${hours} hours. You can cancel it and refer elsewhere.`,
+        { referralId: r.id, requestId: r.request_id }, client
+      );
+    }
+    return { reminded: rows.map((r) => r.id) };
+  });
+}
+
 module.exports = {
+  fulfil,
+  slip,
+  expireHolds,
+  remindPending,
   getById,
   getByIdOrThrow,
   getForUser,

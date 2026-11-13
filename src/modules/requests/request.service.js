@@ -337,7 +337,38 @@ async function cancel(user, id, reason = null) {
   });
 }
 
+/**
+ * Job (C11): every SENT request past expires_at becomes EXPIRED; the doctor is told.
+ * The same conditional update as acknowledge() (status = 'SENT'), so whichever
+ * commits first wins (edge case 16).
+ * @returns {Promise<{expired:number[]}>}
+ */
+async function expireDue() {
+  return withTransaction(async (client) => {
+    const { rows } = await client.query(
+      `UPDATE stock_requests r SET status = 'EXPIRED', expired_at = now()
+         FROM doctors d
+        WHERE r.status = 'SENT' AND r.expires_at <= now() AND d.id = r.doctor_id
+       RETURNING r.id, r.request_no, r.shop_id, d.user_id AS doctor_user_id`
+    );
+    for (const r of rows) {
+      state.assertTransition('SENT', 'EXPIRED', 'SYSTEM', { request: { expiresAt: 0 } });
+      await notifications.notifyUser(
+        r.doctor_user_id,
+        {
+          channels: ['IN_APP'], type: 'REQUEST_EXPIRED', title: `Request ${r.request_no} expired`,
+          body: `The shop did not acknowledge ${r.request_no} in time. You can send a new request to another shop.`,
+          data: { requestId: r.id, shopId: r.shop_id }, dedupeKey: `request-expired:${r.id}`,
+        },
+        { client }
+      );
+    }
+    return { expired: rows.map((r) => r.id) };
+  });
+}
+
 module.exports = {
+  expireDue,
   acknowledge,
   dispense,
   close,
