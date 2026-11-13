@@ -320,25 +320,31 @@ Migrations `010`–`019` are claimed for catalog + stock.
 `src/modules/inventory/stock.service.js` is the **only** code that changes stock. Every function takes
 `opts = { client }` last to join your transaction (SAVEPOINT). Full JSDoc is in the file.
 
-| Function | Status |
-| --- | --- |
-| `stockIn` | **real** since Nov 8 |
-| `getAvailable` | **real** since Nov 8 (brought forward from Nov 12 so lookups see real stock) |
-| `reserve`, `release` | **real** since Nov 8 (brought forward so referral holds use real stock) |
-| `dispense`, `adjust`, `writeOff` | stub until Nov 10 |
+All seven functions are real (`stockIn`, `getAvailable`, `reserve`, `release` since Nov 8; `dispense`,
+`adjust`, `writeOff` since Nov 10).
 
-The stubs live in `stock.stub.js`: they validate input like the real service and keep their own stock in
-memory (FEFO, `INSUFFICIENT_STOCK`, `STALE_INVENTORY`, idempotent replays), so they **don't** see stock
-received through the real `stockIn` yet.
+How it never oversells: `dispense` and `reserve` lock the medicine's inventory rows in `batch_id` order (so
+multi-batch calls can't deadlock), pick earliest-expiry first, and every update is conditional on the stock
+still being there. When two callers race for the last units, one wins and the other gets
+`409 INSUFFICIENT_STOCK`. The same idempotency key never changes stock twice, even when both requests arrive
+at once.
 
-`reserve` locks rows in `batch_id` order (as `dispense` will), so two referrals racing for the last units
-can't both win. Call it once per referral (inside the PENDING → ACCEPTED transition) and keep its `lines`;
-`release` never takes `reserved` below 0, so calling it twice is safe.
+`reserve`: call it once per referral (inside the PENDING → ACCEPTED transition) and keep its `lines`;
+`release` never takes `reserved` below 0, so calling it twice is safe. Held units can't be dispensed to
+walk-ins; `dispense({ reservation: lines })` takes exactly the held units and clears the hold.
 
-`POST /shops/:shopId/stock-in` (any active staff of the shop, or ADMIN; `Idempotency-Key` required):
-`{ medicineId, batchNo, manufactureDate?, expiryDate, mrp, quantity, reason? }` → `201 { batch, batchCreated,
-inventory, movement, replayed }`. Errors: `422 BATCH_EXPIRED`, `409 BATCH_MISMATCH`, `409 SHOP_INACTIVE`,
-`409 MEDICINE_INACTIVE`, `403 NOT_SHOP_STAFF`. `getAvailable` only counts active shops.
+#### Stock routes (all need `Idempotency-Key`)
+
+| Method & path | Who | Body → result |
+| --- | --- | --- |
+| POST /shops/:shopId/stock-in | shop staff | `{ medicineId, batchNo, manufactureDate?, expiryDate, mrp, quantity, reason? }` → `{ batch, batchCreated, inventory, movement, replayed }` |
+| POST /shops/:shopId/dispense | shop staff | `{ medicineId, quantity, requestId?, referralId?, reservation?, reason? }` → `{ lines: [{ batchId, batchNo, expiryDate, quantity, movementId, balanceAfter }], replayed }` |
+| POST /shops/:shopId/adjustments | shop OWNER | `{ batchId, delta, expectedVersion, reason }` → `{ inventory, movement, replayed }` |
+| POST /shops/:shopId/write-offs | shop OWNER | `{ batchId, quantity?, expectedVersion?, reason }` → `{ inventory, movement, replayed }` |
+
+ADMIN can use all of them. Errors: `422 BATCH_EXPIRED`, `409 BATCH_MISMATCH`, `409 INSUFFICIENT_STOCK`,
+`409 STALE_INVENTORY`, `400 REASON_REQUIRED`, `409 SHOP_INACTIVE`, `409 MEDICINE_INACTIVE`,
+`422 IDEMPOTENCY_KEY_REUSED`, `403 NOT_SHOP_STAFF` / `NOT_SHOP_OWNER`. `getAvailable` only counts active shops.
 
 ```js
 const stock = require('../inventory/stock.service');
@@ -377,7 +383,7 @@ await stock.dispense({ shopId, medicineId, quantity, requestId, performedBy, ide
 | 1 | Tue Nov 4 | Migrations for generics, medicines, batches; stock.service stub with agreed signatures ✅ |
 | 2 | Thu Nov 6 | Catalog services and routes: search, create, edit, deactivate, MEDICINE_IN_USE (B1–B3) ✅ |
 | 3 | Sat Nov 8 | Inventory + stock_movements (grants revoked); real stockIn (B4, B5, B7) ✅ |
-| 4 | Mon Nov 10 | Real dispense: FEFO, atomic update, batch-order locks, idempotency (B8); adjust, writeOff (B9) |
+| 4 | Mon Nov 10 | Real dispense: FEFO, atomic update, batch-order locks, idempotency (B8); adjust, writeOff (B9) ✅ |
 | 5 | Wed Nov 12 | reserve/release, STALE_INVENTORY, availability helper (B10), inventory list route |
 | 6 | Fri Nov 14 | Thresholds (B11), expiryScan + lowStockScan jobs, post-dispense low-stock check (B12), seed stock |
 | 7 | Sun Nov 16 | FEFO + concurrent dispense tests, edge cases 3, 5, 6, 14, 15; merge to main |
