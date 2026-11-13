@@ -1,21 +1,12 @@
 'use strict';
 
+/** notification.service input checks — no database needed (they run before any query). */
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const svc = require('../src/modules/notifications/notification.service');
 
 const base = { type: 'LOW_STOCK', title: 'Low stock', body: 'Paracetamol 500mg below 10 strips' };
-
-test('notifyShop returns one row per channel with the agreed shape', async () => {
-  const res = await svc.notifyShop(7, { ...base, channels: ['IN_APP', 'SMS'], dedupeKey: 'low-stock:7:42' });
-  assert.equal(res.deduped, false);
-  assert.equal(res.notifications.length, 2);
-  for (const n of res.notifications) {
-    assert.ok(Number.isInteger(n.id));
-    assert.ok(['IN_APP', 'SMS'].includes(n.channel));
-    assert.equal(n.status, 'PENDING');
-  }
-});
 
 test('SMS bodies over 160 characters are rejected', async () => {
   await assert.rejects(
@@ -37,4 +28,9 @@ test('invalid input lists every bad field', async () => {
     assert.deepEqual(e.details.map((d) => d.field), ['recipientType', 'recipientId', 'channels', 'type', 'title', 'body']);
     return true;
   });
+});
+
+test('type must be UPPER_SNAKE_CASE and data an object', async () => {
+  await assert.rejects(svc.notifyUser(1, { ...base, channels: ['IN_APP'], type: 'low stock' }), (e) => e.details[0].field === 'type');
+  await assert.rejects(svc.notifyUser(1, { ...base, channels: ['IN_APP'], data: [1] }), (e) => e.details[0].field === 'data');
 });

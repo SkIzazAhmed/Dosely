@@ -11,6 +11,13 @@
  *   P8  The first number added becomes primary
  *   P9  Setting a new primary unsets the old one in the same transaction
  *   P10 The primary can't be removed while other numbers exist → 409 PHONE_PRIMARY_REQUIRED
+ *   P11 A user's primary must be verified (switching to an unverified number, or
+ *       editing the digits of a user's primary while they have other numbers,
+ *       → 422 PHONE_NOT_VERIFIED). Patients and shops may have an unverified
+ *       primary, but SMS only goes to verified, reachable mobiles (pickSmsPhone).
+ *   P12 Editing the digits resets verification.
+ *   P13 3 consecutive failed SMS mark the number UNREACHABLE (recordDeliveryFailure);
+ *       notification.service alerts the shop or doctor.
  *
  * Every change locks the owner row first, so two concurrent adds can't both
  * slip under the limit or both become primary.
@@ -187,9 +194,13 @@ async function add(ownerType, ownerId, input, { verifiedBy = null, verified = fa
   }
 }
 
-/** Hook for P11 (Commit 5): may this number become the owner's primary? */
-async function assertCanBecomePrimary(client, ownerType, phoneId) { // eslint-disable-line no-unused-vars
-  return true;
+/** P11: a user's primary must be verified. Patients and shops may have an unverified primary. */
+async function assertCanBecomePrimary(client, ownerType, phoneId) {
+  if (ownerType !== 'USER') return;
+  const { rows: [row] } = await client.query('SELECT status FROM phone_numbers WHERE id = $1', [phoneId]);
+  if (!row || row.status !== 'VERIFIED') {
+    throw new AppError('PHONE_NOT_VERIFIED', "A user's primary number must be verified first", { phoneId });
+  }
 }
 
 async function lockPhone(client, phoneId) {
@@ -199,15 +210,41 @@ async function lockPhone(client, phoneId) {
 }
 
 /**
- * Update label and/or primary flag. patch: { label?, isPrimary? }
- * (Editing the digits arrives with P12 in Commit 5.)
+ * Update digits, label and/or primary flag. patch: { number?, label?, isPrimary? }
+ * P12: new digits reset verification and delivery-failure tracking.
  */
 async function update(phoneId, patch) {
   try {
     return await withTransaction(async (client) => {
       const current = await getByIdOrThrow(phoneId, { client });
       await lockOwner(client, current.ownerType, current.ownerId);
-      const row = await lockPhone(client, phoneId);
+      let row = await lockPhone(client, phoneId);
+
+      if (patch.number !== undefined) {
+        const n = normalizePhone(patch.number, patch.label || row.label);    // P1–P3
+        if (n.e164 !== row.e164) {
+          const others = (await activeRows(client, row.owner_type, row.owner_id)).filter((r) => r.id !== row.id);
+          if (others.some((r) => r.e164 === n.e164)) {                        // P4
+            throw new AppError('PHONE_DUPLICATE_FOR_OWNER', undefined, { e164: n.e164 });
+          }
+          if (row.owner_type === 'USER') {
+            await assertNotTakenByOtherUser(client, n.e164, row.owner_id);    // P6
+            if (row.is_primary && others.length > 0) {                        // P11
+              throw new AppError('PHONE_NOT_VERIFIED',
+                "Changing these digits would leave the user's primary unverified; make another verified number primary first",
+                { phoneId });
+            }
+          }
+          await client.query(                                                  // P12
+            `UPDATE phone_numbers
+                SET e164 = $2, kind = $3, label = $4, status = 'UNVERIFIED', verified_at = NULL, verified_by = NULL,
+                    consecutive_failures = 0, last_failure_at = NULL, unreachable_at = NULL
+              WHERE id = $1`,
+            [phoneId, n.e164, n.kind, n.label]
+          );
+          row = await lockPhone(client, phoneId);
+        }
+      }
 
       if (patch.label !== undefined && patch.label !== row.label) {
         if (row.kind === 'LANDLINE' && patch.label === 'MOBILE') {          // P3
@@ -245,6 +282,81 @@ async function remove(phoneId) {
   });
 }
 
+/**
+ * Verify a number by staff confirmation (F5.3, MVP). Also clears UNREACHABLE
+ * and the failure count. P6: a user number already verified for someone else → PHONE_TAKEN.
+ */
+async function verify(phoneId, verifiedBy) {
+  try {
+    return await withTransaction(async (client) => {
+      const current = await getByIdOrThrow(phoneId, { client });
+      await lockOwner(client, current.ownerType, current.ownerId);
+      const row = await lockPhone(client, phoneId);
+      if (row.owner_type === 'USER') await assertNotTakenByOtherUser(client, row.e164, row.owner_id);
+      await client.query(
+        `UPDATE phone_numbers
+            SET status = 'VERIFIED', verified_at = now(), verified_by = $2,
+                consecutive_failures = 0, last_failure_at = NULL, unreachable_at = NULL
+          WHERE id = $1`,
+        [phoneId, verifiedBy]
+      );
+      return getById(phoneId, { client });
+    });
+  } catch (err) {
+    throw fromPgError(err, PG_MAP);
+  }
+}
+
+const UNREACHABLE_AFTER = 3;
+
+/**
+ * P13: count a failed SMS. The 3rd failure in a row marks a verified number
+ * UNREACHABLE. Returns { phone, becameUnreachable }.
+ */
+async function recordDeliveryFailure(phoneId, { client } = {}) {
+  const { rows: [row] } = await query(
+    `UPDATE phone_numbers
+        SET consecutive_failures = consecutive_failures + 1,
+            last_failure_at = now(),
+            status = CASE WHEN status = 'VERIFIED' AND consecutive_failures + 1 >= $2 THEN 'UNREACHABLE'::phone_status ELSE status END,
+            unreachable_at = CASE WHEN status = 'VERIFIED' AND consecutive_failures + 1 >= $2 THEN now() ELSE unreachable_at END
+      WHERE id = $1
+      RETURNING ${COLUMNS}, (status = 'UNREACHABLE' AND consecutive_failures = $2) AS became_unreachable`,
+    [phoneId, UNREACHABLE_AFTER],
+    client
+  );
+  if (!row) throw AppError.notFound('Phone number', phoneId);
+  return { phone: toPublic(row), becameUnreachable: row.became_unreachable };
+}
+
+/** A delivered SMS resets the failure streak (and makes an UNREACHABLE number reachable again). */
+async function recordDeliverySuccess(phoneId, { client } = {}) {
+  const { rows: [row] } = await query(
+    `UPDATE phone_numbers
+        SET consecutive_failures = 0,
+            status = CASE WHEN status = 'UNREACHABLE' THEN 'VERIFIED'::phone_status ELSE status END,
+            unreachable_at = NULL
+      WHERE id = $1 RETURNING ${COLUMNS}`,
+    [phoneId],
+    client
+  );
+  return toPublic(row);
+}
+
+/**
+ * P11 / edge cases 9 and 10: the number an SMS should go to — a verified,
+ * reachable, active mobile, primary first. Returns { phone } or
+ * { phone: null, reason: 'NO_PHONE' | 'NO_VERIFIED_MOBILE' | 'PHONE_UNREACHABLE' }.
+ */
+async function pickSmsPhone(ownerType, ownerId, { client } = {}) {
+  const all = await list(ownerType, ownerId, { client });
+  if (all.length === 0) return { phone: null, reason: 'NO_PHONE' };
+  const usable = all.find((p) => p.kind === 'MOBILE' && p.status === 'VERIFIED');
+  if (usable) return { phone: usable };
+  const unreachable = all.some((p) => p.kind === 'MOBILE' && p.status === 'UNREACHABLE');
+  return { phone: null, reason: unreachable ? 'PHONE_UNREACHABLE' : 'NO_VERIFIED_MOBILE' };
+}
+
 /** Login by phone: the user who owns this verified number (unique by P6). */
 async function findUserIdByVerifiedPhone(e164) {
   const { rows } = await query(
@@ -266,6 +378,11 @@ module.exports = {
   update,
   remove,
   findUserIdByVerifiedPhone,
+  verify,
+  recordDeliveryFailure,
+  recordDeliverySuccess,
+  pickSmsPhone,
+  UNREACHABLE_AFTER,
   // internals reused by Commit 5
   _internal: { lockOwner, lockPhone, activeRows, switchPrimary, PG_MAP, COLUMNS },
 };

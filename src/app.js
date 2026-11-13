@@ -11,6 +11,8 @@ const shopRoutes = require('./modules/shops/shops.routes');
 const patientRoutes = require('./modules/patients/patients.routes');
 const { phoneRouter } = require('./modules/phones/phones.routes');
 const patientsService = require('./modules/patients/patients.service');
+const phoneVerifyRoutes = require('./modules/phones/verify.routes');
+const notificationRoutes = require('./modules/notifications/notifications.routes');
 const requestRoutes = require('./modules/requests/request.routes');
 const medicineRoutes = require('./modules/medicines/medicines.routes');
 const genericRoutes = require('./modules/medicines/generics.routes');
@@ -42,6 +44,8 @@ function createApp() {
     beforeAdd: (patientId) => patientsService.assertActive(patientId),
   }));
   app.use('/shops/:ownerId/phones', phoneRouter('SHOP'));
+  app.use('/phones', phoneVerifyRoutes);
+  app.use('/notifications', notificationRoutes);
 
   app.use('/users', userRoutes);
   app.use('/doctors', doctorRoutes);
@@ -51,10 +55,6 @@ function createApp() {
   app.use('/medicines', medicineRoutes); // Rachana: catalog (B1–B3)
   app.use('/generics', genericRoutes);
   app.use('/shops', inventoryRoutes); // Rachana: /shops/:shopId/stock-in (B4–B7)
-
-  // Module routers still to land:
-  //   Commit 5 (Nov 12): /phones/:id/verify
-  //   Commit 5 (Nov 12): /notifications
 
   app.use(notFound);
   app.use(errorHandler);

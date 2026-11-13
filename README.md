@@ -112,8 +112,11 @@ All routes except `POST /auth/login` need `Authorization: Bearer <token>`.
 | DELETE /patients/:id | creator or ADMIN | deactivate; `POST /patients/:id/activate` (ADMIN) |
 | GET /{users,patients,shops}/:id/phones | see Phone numbers | `?includeRemoved=true`; primary first |
 | POST /{users,patients,shops}/:id/phones | see Phone numbers | `{ number, label? = MOBILE, isPrimary? }` → phone + `warnings` |
-| PATCH /{users,patients,shops}/:id/phones/:phoneId | see Phone numbers | `{ label?, isPrimary? }` |
+| PATCH /{users,patients,shops}/:id/phones/:phoneId | see Phone numbers | `{ number?, label?, isPrimary? }` — new digits reset verification (P12) |
 | DELETE /{users,patients,shops}/:id/phones/:phoneId | see Phone numbers | deactivate |
+| POST /phones/:phoneId/verify | staff confirmation (see P11–P13) | marks VERIFIED, clears UNREACHABLE |
+| GET /notifications | logged in | own in-app inbox: `?unreadOnly=&limit=&before=` |
+| POST /notifications/:id/read, POST /notifications/read-all | logged in | |
 
 ### Using auth in your module (Rachana, Anushka)
 
@@ -217,39 +220,60 @@ on `main` — the runner checks checksums and stops. Add a new file instead.
 **Transactions.** Anything that writes to more than one table goes through `withTransaction`, and every
 query inside it uses the `client` it gives you.
 
-## notification.service contract (agree Nov 4)
+## Notifications (A10) — notification.service is live
 
-Stubs are in `src/modules/notifications/notification.service.js` and already validate input, so you can
-call them now; the real service replaces them on **Nov 12** (in-app) and **Nov 14** (SMS/email) with
-the same signatures.
+Same signatures as the Nov 4 stubs — nothing to change in your code. Rows are now real: in-app ones show up
+in the person's inbox (`GET /notifications`), SMS / EMAIL ones are queued as `PENDING` for the delivery job (Commit 6).
 
 ```js
 const notifications = require('../notifications/notification.service');
 
-// Rachana — low-stock alert to every active staff member of a shop
+// Rachana — low-stock alert to every active staff member of a shop (removed staff get nothing)
 await notifications.notifyShop(shopId, {
   channels: ['IN_APP'],
-  type: 'LOW_STOCK',
+  type: 'LOW_STOCK',                                   // UPPER_SNAKE_CASE
   title: 'Low stock',
   body: `${itemName} is below ${threshold}`,
-  data: { itemId },
-  dedupeKey: `low-stock:${shopId}:${itemId}:${today}`,
-}, { client });             // pass your transaction client if you're in one
+  data: { medicineId },
+  dedupeKey: `low-stock:${shopId}:${medicineId}:${today}`,   // F6.4: once per shop + medicine per day
+}, { client });             // inside your transaction: only created if you commit
 
-// Anushka — referral SMS to a patient (≤ 160 chars)
-await notifications.notifyPatient(patientId, {
-  channels: ['SMS'],
-  type: 'REFERRAL_SENT',
+// Anushka — referral SMS to a patient (≤ 160 chars). Put shopId / doctorUserId in data so the
+// right person is alerted if the number turns out to be unreachable (P13).
+const r = await notifications.notifyPatient(patientId, {
+  type: 'REFERRAL_ACCEPTED',
   title: 'Referral',
-  body: `Your prescription was sent to ${shopName}. Code ${code}`,
-  dedupeKey: `referral:${referralId}`,
+  body: `Your medicine is ready at ${shopName}. Code ${code}`,
+  data: { referralId, shopId: originShopId, doctorUserId },
+  dedupeKey: `referral-sms:${referralId}`,
 });
+if (r.skipped.length) {
+  // edge cases 9 and 10 / F4.9: no usable phone — tell staff to inform the patient in person and print the slip
+  // r.skipped[0].skipReason is NO_PHONE | NO_VERIFIED_MOBILE | PHONE_UNREACHABLE
+}
 ```
 
-Returns `{ deduped, notifications: [{ id, channel, recipientUserId, status }] }`.
-Also: `notifyUser(userId, payload, opts)`, `notify({ recipientType, recipientId, ...payload })`,
-`listInbox(userId, { unreadOnly, limit, before })`, `markRead(notificationId, userId)`.
-Patients have no login, so `IN_APP` to a patient is a validation error.
+Returns `{ deduped, notifications: [{ id, channel, recipientUserId, status, phoneId, skipReason }], skipped }`.
+
+| Channel | Who | Status when created |
+| --- | --- | --- |
+| IN_APP | users (a shop = all its active staff) | `SENT` — it's in their inbox |
+| SMS | a user's or patient's verified, reachable mobile (primary first) | `PENDING`, or `SKIPPED` + `skipReason` |
+| EMAIL | a user's email | `PENDING`, or `SKIPPED` + `NO_EMAIL` |
+
+- **Dedupe:** a `dedupeKey` that was used before returns `{ deduped: true }` with the earlier rows and creates nothing,
+  even with concurrent callers.
+- **Inbox routes:** `GET /notifications?unreadOnly=&limit=&before=` → `{ items, unreadCount, nextBefore }`,
+  `POST /notifications/:id/read`, `POST /notifications/read-all`.
+
+## Phone verification and delivery rules (P11–P13)
+
+| Rule | What happens | Error |
+| --- | --- | --- |
+| Verify | `POST /phones/:phoneId/verify` — staff confirmation (F5.3). Patients' numbers: DOCTOR / SHOPKEEPER / ADMIN; shop numbers: that shop's staff; a user's number: ADMIN or an OWNER of a shop they work at. Nobody verifies their own. | 403 FORBIDDEN |
+| P11 | A user's primary must be verified: switching to an unverified number, or changing the digits of a user's primary while they have other numbers, is refused. Patients and shops may have an unverified primary, but SMS only goes to verified, reachable mobiles. | 422 PHONE_NOT_VERIFIED |
+| P12 | `PATCH …/phones/:phoneId { number }` with new digits resets verification and the failure count | — |
+| P13 | 3 failed SMS in a row mark a verified number `UNREACHABLE`; the shop (or the doctor / whoever added the patient) gets an in-app `PHONE_UNREACHABLE` alert. Re-verifying clears it. | — |
 
 ## Catalog and stock (Rachana)
 
@@ -418,6 +442,6 @@ Until Izaz's `shops` / `shop_staff` tables land, `src/modules/requests/shopAcces
 | 2 | Thu Nov 6 | Users, bcrypt, JWT login, rbac + idempotency middleware, doctors ✅ |
 | 3 | Sat Nov 8 | Shops, shop staff, patients + seed data ✅ |
 | 4 | Mon Nov 10 | Phone numbers, validator, CRUD, rules P1–P10 ✅ |
-| 5 | Wed Nov 12 | Rules P11–P13, verify route, real notification.service + inbox |
+| 5 | Wed Nov 12 | Rules P11–P13, verify route, real notification.service + inbox ✅ |
 | 6 | Fri Nov 14 | SMS/email channels, retries with backoff, unreachable after 3 failures |
 | 7 | Sun Nov 16 | Edge-case tests 4, 9, 10, fixes, README, merge to main |
