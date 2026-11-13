@@ -1,14 +1,14 @@
 'use strict';
 
 /**
- * Stock routes (mounted at /shops).
+ * Stock routes (mounted at /shops). All need an Idempotency-Key.
  *
- *   POST /shops/:shopId/stock-in    any active staff of the shop (or ADMIN), Idempotency-Key
+ *   POST /shops/:shopId/stock-in      shop staff (or ADMIN)     B4–B7
+ *   POST /shops/:shopId/dispense      shop staff (or ADMIN)     B8
+ *   POST /shops/:shopId/adjustments   shop OWNER (or ADMIN)     B9
+ *   POST /shops/:shopId/write-offs    shop OWNER (or ADMIN)     B9
  *
- * Coming next: POST /shops/:shopId/dispense (Nov 10), POST /shops/:shopId/adjustments (Nov 10),
- * GET /shops/:shopId/inventory?low=true&expiring=90 (Nov 12).
- *
- * Middleware is attached per route (not router.use) because Izaz's shops
+ * Middleware is attached per route (not router.use) because the shops
  * router shares the /shops prefix.
  */
 
@@ -43,6 +43,83 @@ router.post(
       manufactureDate: req.body.manufactureDate,
       expiryDate: req.body.expiryDate,
       mrp: req.body.mrp,
+      performedBy: req.user.id,
+      idempotencyKey: req.get('Idempotency-Key'),
+    });
+    res.status(201).json(result);
+  })
+);
+
+// POST /shops/:shopId/dispense
+// { medicineId, quantity, requestId?, referralId?, reservation?: [{ batchId, quantity }], reason? }
+router.post(
+  '/:shopId/dispense',
+  authenticate,
+  requireShopStaff(),
+  idempotency(),
+  asyncHandler(async (req, res) => {
+    const shopId = idParam(req.params.shopId, 'Shop');
+    const body = validate(req.body, {
+      medicineId: { type: 'integer', min: 1, required: true },
+      quantity: { type: 'integer', min: 1, max: 1000000, required: true },
+      requestId: { type: 'integer', min: 1 },
+      referralId: { type: 'integer', min: 1 },
+      reason: { type: 'string', max: 500 },
+    });
+    const result = await stock.dispense({
+      ...body,
+      shopId,
+      reservation: req.body.reservation,
+      performedBy: req.user.id,
+      idempotencyKey: req.get('Idempotency-Key'),
+    });
+    res.status(201).json(result);
+  })
+);
+
+// POST /shops/:shopId/adjustments — OWNER
+// { batchId, delta, expectedVersion, reason }
+router.post(
+  '/:shopId/adjustments',
+  authenticate,
+  requireShopStaff({ owner: true }),
+  idempotency(),
+  asyncHandler(async (req, res) => {
+    const shopId = idParam(req.params.shopId, 'Shop');
+    const body = validate(req.body, {
+      batchId: { type: 'integer', min: 1, required: true },
+      delta: { type: 'integer', min: -1000000, max: 1000000, required: true },
+      expectedVersion: { type: 'integer', min: 0, required: true },
+    });
+    const result = await stock.adjust({
+      ...body,
+      shopId,
+      reason: req.body.reason,
+      performedBy: req.user.id,
+      idempotencyKey: req.get('Idempotency-Key'),
+    });
+    res.status(201).json(result);
+  })
+);
+
+// POST /shops/:shopId/write-offs — OWNER
+// { batchId, quantity?, expectedVersion?, reason }   quantity defaults to all unreserved units
+router.post(
+  '/:shopId/write-offs',
+  authenticate,
+  requireShopStaff({ owner: true }),
+  idempotency(),
+  asyncHandler(async (req, res) => {
+    const shopId = idParam(req.params.shopId, 'Shop');
+    const body = validate(req.body, {
+      batchId: { type: 'integer', min: 1, required: true },
+      quantity: { type: 'integer', min: 1, max: 1000000 },
+      expectedVersion: { type: 'integer', min: 0 },
+    });
+    const result = await stock.writeOff({
+      ...body,
+      shopId,
+      reason: req.body.reason,
       performedBy: req.user.id,
       idempotencyKey: req.get('Idempotency-Key'),
     });

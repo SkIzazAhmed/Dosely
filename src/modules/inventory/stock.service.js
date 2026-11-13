@@ -8,13 +8,9 @@
  * else (trigger inventory_require_stock_service) and refuses any change to
  * the ledger (stock_movements_append_only).
  *
- * Status (signatures are final — see README "stock.service contract"):
- *   stockIn          REAL (Nov 8)   B4, B5, B7, edge cases 3 and 15
- *   getAvailable     REAL (Nov 8)   B10, brought forward so lookups see real stock
- *   reserve, release REAL (Nov 8)   brought forward so referral holds use real stock
- *   dispense, adjust, writeOff      stub until Nov 10 (B8, B9)
- * The stubbed functions come from stock.stub.js: they validate input like the
- * real ones but work on in-memory stock, so they don't see real stock yet.
+ * Signatures are final — see README "stock.service contract". All functions
+ * are real: stockIn, getAvailable, reserve, release (Nov 8); dispense,
+ * adjust, writeOff (Nov 10).
  *
  * Every function takes an optional last argument `opts = { client }`: pass
  * your transaction client and the stock change joins your transaction
@@ -28,7 +24,6 @@ const medicines = require('../medicines/medicine.service');
 const batches = require('../medicines/batch.service');
 const inventoryModel = require('./inventory.model');
 const movementModel = require('./movement.model');
-const stub = require('./stock.stub');
 
 const MAX_QTY = 1000000;
 
@@ -307,6 +302,403 @@ async function release(input, opts = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// shared helpers for dispense / adjust / writeOff
+// ---------------------------------------------------------------------------
+
+function requireReason(reason) {
+  if (typeof reason !== 'string' || reason.trim().length < 3 || reason.length > 500) {
+    throw new AppError('REASON_REQUIRED', 'A reason of 3–500 characters is required for this stock change');
+  }
+  return reason.trim();
+}
+
+const isIdemConflict = (err) => err && err.code === '23505' && err.constraint === 'stock_movements_idempotency_key';
+
+/** Lock one shop + batch inventory row (with its batch) for an owner edit. */
+async function lockRow(shopId, batchId, client) {
+  const { rows } = await client.query(
+    `SELECT i.id, i.shop_id, i.batch_id, i.quantity, i.reserved, i.version,
+            b.medicine_id, b.batch_no, b.expiry_date::text AS expiry_date
+       FROM inventory i
+       JOIN medicine_batches b ON b.id = i.batch_id
+      WHERE i.shop_id = $1 AND i.batch_id = $2
+      FOR UPDATE OF i`,
+    [shopId, batchId]
+  );
+  if (!rows[0]) throw AppError.notFound('Inventory', { shopId, batchId });
+  return rows[0];
+}
+
+/** Single-row change (ADJUSTMENT / EXPIRY_WRITE_OFF): update quantity, append movement. */
+async function applyRowChange(row, type, delta, input, reason, client) {
+  await inventoryModel.enableStockWrites(client);
+  const { rows: [inv] } = await client.query(
+    'UPDATE inventory SET quantity = quantity + $2 WHERE id = $1 RETURNING *',
+    [row.id, delta]
+  );
+  const movement = await movementModel.insert({
+    type,
+    shopId: row.shop_id,
+    batchId: row.batch_id,
+    inventoryId: row.id,
+    delta,
+    balanceAfter: inv.quantity,
+    reason,
+    performedBy: input.performedBy,
+    idempotencyKey: input.idempotencyKey || null,
+  }, { client });
+  await inventoryModel.disableStockWrites(client);
+  return { inventory: inventoryModel.toPublic(inv), movement };
+}
+
+/** Earlier single-row change under the same key, or null. Same key for a different change → 422. */
+async function replayRowChange(input, type, matches, client) {
+  if (!input.idempotencyKey) return null;
+  const [m] = await movementModel.findByIdempotencyKey(input.shopId, type, input.idempotencyKey, { client });
+  if (!m) return null;
+  if (!matches(m)) {
+    throw new AppError('IDEMPOTENCY_KEY_REUSED', 'This idempotency key was already used for a different stock change', {
+      movementId: m.id,
+    });
+  }
+  const inventory = await inventoryModel.getByShopBatch(input.shopId, m.batchId, { client });
+  return { inventory, movement: m, replayed: true };
+}
+
+// ---------------------------------------------------------------------------
+// dispense (B8)
+// ---------------------------------------------------------------------------
+
+function validateDispense(input) {
+  if (!input || typeof input !== 'object') throw AppError.validation([{ field: 'input', issue: 'required' }]);
+  const errors = [];
+  checkId(input.shopId, 'shopId', errors);
+  checkId(input.medicineId, 'medicineId', errors);
+  checkId(input.performedBy, 'performedBy', errors);
+  if (input.quantity === undefined || input.quantity === null) errors.push({ field: 'quantity', issue: 'required' });
+  else if (!Number.isInteger(input.quantity) || input.quantity <= 0 || input.quantity > MAX_QTY) {
+    errors.push({ field: 'quantity', issue: `must be an integer from 1 to ${MAX_QTY}` });
+  }
+  if (input.idempotencyKey === undefined || input.idempotencyKey === null || input.idempotencyKey === '') {
+    errors.push({ field: 'idempotencyKey', issue: 'required' });
+  } else {
+    checkText(input.idempotencyKey, 'idempotencyKey', errors, 255);
+  }
+  checkId(input.requestId, 'requestId', errors, { required: false });
+  checkId(input.referralId, 'referralId', errors, { required: false });
+  checkText(input.reason, 'reason', errors, 500);
+  if (input.reservation !== undefined && input.reservation !== null) {
+    const before = errors.length;
+    checkLines(input.reservation, errors);
+    if (errors.length > before) errors[errors.length - 1].field = 'reservation';
+    else if (input.reservation.reduce((n, l) => n + l.quantity, 0) !== input.quantity) {
+      errors.push({ field: 'reservation', issue: 'line quantities must add up to quantity' });
+    } else if (new Set(input.reservation.map((l) => l.batchId)).size !== input.reservation.length) {
+      errors.push({ field: 'reservation', issue: 'each batch may appear once' });
+    }
+  }
+  if (errors.length) throw AppError.validation(errors);
+}
+
+function dispenseResult(input, lines, replayed) {
+  return {
+    shopId: input.shopId,
+    medicineId: input.medicineId,
+    quantity: input.quantity,
+    lines: [...lines].sort((a, b) => (a.expiryDate < b.expiryDate ? -1 : a.expiryDate > b.expiryDate ? 1 : a.batchId - b.batchId)),
+    replayed,
+  };
+}
+
+async function replayDispense(input, client) {
+  const rows = await movementModel.findByIdempotencyKey(input.shopId, 'DISPENSE', input.idempotencyKey, { client });
+  if (rows.length === 0) return null;
+  const lines = [];
+  for (const m of rows) {
+    const b = await batches.getById(m.batchId, { client });
+    lines.push({ batchId: b.id, batchNo: b.batchNo, expiryDate: b.expiryDate, quantity: -m.delta, movementId: m.id, balanceAfter: m.balanceAfter, medicineId: b.medicineId });
+  }
+  const total = lines.reduce((n, l) => n + l.quantity, 0);
+  if (total !== input.quantity || lines.some((l) => l.medicineId !== input.medicineId)) {
+    throw new AppError('IDEMPOTENCY_KEY_REUSED', 'This idempotency key was already used for a different dispense', {
+      movementIds: rows.map((r) => r.id),
+    });
+  }
+  return dispenseResult(input, lines.map(({ medicineId, ...l }) => l), true); // eslint-disable-line no-unused-vars
+}
+
+/**
+ * Dispense a medicine from a shop (DISPENSE, B8).
+ *
+ * Without `reservation`: takes non-expired, unreserved units earliest-expiry
+ * first (FEFO), across several batches if needed. With `reservation` (the
+ * `lines` reserve() returned): dispenses exactly those held units and clears
+ * the hold, e.g. when a referred patient picks up.
+ *
+ * Never oversells: rows are locked in batch_id order (no deadlocks between
+ * multi-batch dispenses) and every update is conditional on enough stock, so
+ * when two dispenses race for the last units one wins and the other gets
+ * 409 INSUFFICIENT_STOCK. The same idempotency key never dispenses twice.
+ *
+ * @param {Object} input
+ * @param {number} input.shopId
+ * @param {number} input.medicineId
+ * @param {number} input.quantity          base units, 1–1,000,000
+ * @param {number} input.performedBy       users.id
+ * @param {string} input.idempotencyKey    REQUIRED
+ * @param {number} [input.requestId]
+ * @param {number} [input.referralId]
+ * @param {Array<{batchId:number, quantity:number}>} [input.reservation]  must add up to quantity
+ * @param {string} [input.reason]
+ * @param {{client?: import('pg').PoolClient}} [opts]
+ * @returns {Promise<{shopId:number, medicineId:number, quantity:number, replayed:boolean,
+ *           lines: Array<{batchId:number, batchNo:string, expiryDate:string, quantity:number, movementId:number, balanceAfter:number}>}>}
+ * @throws INSUFFICIENT_STOCK (409, details.available), SHOP_INACTIVE, IDEMPOTENCY_KEY_REUSED, VALIDATION_ERROR
+ */
+async function dispense(input, opts = {}) {
+  validateDispense(input);
+  const prev = await replayDispense(input, opts.client);
+  if (prev) return prev;
+
+  try {
+    return await withTransaction(async (client) => {
+      await assertShopActive(input.shopId, client);
+
+      let plan;
+      if (input.reservation) {
+        const ids = input.reservation.map((l) => l.batchId);
+        const { rows } = await client.query(
+          `SELECT i.id, i.batch_id, i.quantity, i.reserved, b.medicine_id, b.batch_no,
+                  b.expiry_date::text AS expiry_date, (b.expiry_date <= ${batches.TODAY_SQL}) AS expired
+             FROM inventory i
+             JOIN medicine_batches b ON b.id = i.batch_id
+            WHERE i.shop_id = $1 AND i.batch_id = ANY($2::bigint[])
+            ORDER BY i.batch_id
+            FOR UPDATE OF i`,
+          [input.shopId, ids]
+        );
+        // A racing request with the same key may have committed while we waited for the locks.
+        const prior = await replayDispense(input, client);
+        if (prior) return prior;
+        const byBatch = new Map(rows.map((r) => [Number(r.batch_id), r]));
+        plan = input.reservation.map((l) => {
+          const r = byBatch.get(l.batchId);
+          if (!r || r.medicine_id !== input.medicineId || r.expired || r.reserved < l.quantity) {
+            throw new AppError('INSUFFICIENT_STOCK', 'Reserved stock is no longer available', {
+              batchId: l.batchId, reserved: r ? r.reserved : 0, requested: l.quantity, expired: r ? r.expired : undefined,
+            });
+          }
+          return { r, qty: l.quantity, fromReserved: true };
+        });
+      } else {
+        // Lock every sellable row of the medicine at this shop, in batch_id order.
+        const { rows } = await client.query(
+          `SELECT i.id, i.batch_id, i.quantity, i.reserved, b.batch_no, b.expiry_date::text AS expiry_date
+             FROM inventory i
+             JOIN medicine_batches b ON b.id = i.batch_id
+            WHERE i.shop_id = $1 AND b.medicine_id = $2
+              AND b.expiry_date > ${batches.TODAY_SQL} AND b.is_active AND i.is_active
+            ORDER BY i.batch_id
+            FOR UPDATE OF i`,
+          [input.shopId, input.medicineId]
+        );
+        // A racing request with the same key may have committed while we waited for the locks.
+        const prior = await replayDispense(input, client);
+        if (prior) return prior;
+        const fefo = rows
+          .filter((r) => r.quantity - r.reserved > 0)
+          .sort((a, b) => (a.expiry_date < b.expiry_date ? -1 : a.expiry_date > b.expiry_date ? 1 : a.batch_id - b.batch_id));
+        const available = fefo.reduce((n, r) => n + r.quantity - r.reserved, 0);
+        if (available < input.quantity) {
+          throw new AppError('INSUFFICIENT_STOCK', undefined, {
+            shopId: input.shopId, medicineId: input.medicineId, requested: input.quantity, available,
+          });
+        }
+        plan = [];
+        let left = input.quantity;
+        for (const r of fefo) {
+          if (left === 0) break;
+          const qty = Math.min(left, r.quantity - r.reserved);
+          plan.push({ r, qty, fromReserved: false });
+          left -= qty;
+        }
+      }
+
+      await inventoryModel.enableStockWrites(client);
+      const lines = [];
+      for (const { r, qty, fromReserved } of [...plan].sort((a, b) => a.r.batch_id - b.r.batch_id)) {
+        // Atomic conditional update: only succeeds if the stock is still there.
+        const { rows: [inv] } = fromReserved
+          ? await client.query(
+            `UPDATE inventory SET quantity = quantity - $2, reserved = reserved - $2
+              WHERE id = $1 AND reserved >= $2 RETURNING quantity`,
+            [r.id, qty]
+          )
+          : await client.query(
+            `UPDATE inventory SET quantity = quantity - $2
+              WHERE id = $1 AND quantity - reserved >= $2 RETURNING quantity`,
+            [r.id, qty]
+          );
+        if (!inv) throw new AppError('INSUFFICIENT_STOCK', undefined, { batchId: r.batch_id, requested: qty });
+        const m = await movementModel.insert({
+          type: 'DISPENSE',
+          shopId: input.shopId,
+          batchId: r.batch_id,
+          inventoryId: r.id,
+          delta: -qty,
+          balanceAfter: inv.quantity,
+          reason: input.reason ? input.reason.trim() : null,
+          performedBy: input.performedBy,
+          requestId: input.requestId ?? null,
+          referralId: input.referralId ?? null,
+          idempotencyKey: input.idempotencyKey,
+        }, { client });
+        lines.push({
+          batchId: Number(r.batch_id), batchNo: r.batch_no, expiryDate: r.expiry_date,
+          quantity: qty, movementId: m.id, balanceAfter: inv.quantity,
+        });
+      }
+      await inventoryModel.disableStockWrites(client);
+      await afterDispense(input, client);
+      return dispenseResult(input, lines, false);
+    }, { client: opts.client });
+  } catch (err) {
+    if (isIdemConflict(err)) {
+      const again = await replayDispense(input, opts.client);
+      if (again) return again;
+    }
+    throw err instanceof AppError ? err : mapPgError(err);
+  }
+}
+
+/** Hook run inside the dispense transaction (post-dispense low-stock check lands Nov 14). */
+async function afterDispense(input, client) { // eslint-disable-line no-unused-vars
+}
+
+// ---------------------------------------------------------------------------
+// adjust / writeOff (B9) — OWNER only, enforced by the routes
+// ---------------------------------------------------------------------------
+
+/**
+ * Manual correction after a recount (ADJUSTMENT). Send the inventory
+ * `version` you read: if the row changed since, 409 STALE_INVENTORY.
+ * The result can't go below the reserved units (or 0).
+ *
+ * @param {{shopId:number, batchId:number, delta:number, expectedVersion:number, reason:string,
+ *          performedBy:number, idempotencyKey?:string}} input
+ * @param {{client?: import('pg').PoolClient}} [opts]
+ * @returns {Promise<{inventory:Object, movement:Object, replayed:boolean}>}
+ * @throws STALE_INVENTORY, INSUFFICIENT_STOCK, REASON_REQUIRED, NOT_FOUND
+ */
+async function adjust(input, opts = {}) {
+  if (!input || typeof input !== 'object') throw AppError.validation([{ field: 'input', issue: 'required' }]);
+  const errors = [];
+  checkId(input.shopId, 'shopId', errors);
+  checkId(input.batchId, 'batchId', errors);
+  checkId(input.performedBy, 'performedBy', errors);
+  if (!Number.isInteger(input.delta) || input.delta === 0 || Math.abs(input.delta) > MAX_QTY) {
+    errors.push({ field: 'delta', issue: `must be a non-zero integer between -${MAX_QTY} and ${MAX_QTY}` });
+  }
+  if (!Number.isInteger(input.expectedVersion) || input.expectedVersion < 0) {
+    errors.push({ field: 'expectedVersion', issue: 'required: the inventory version you read' });
+  }
+  checkText(input.idempotencyKey, 'idempotencyKey', errors, 255);
+  if (errors.length) throw AppError.validation(errors);
+  const reason = requireReason(input.reason);
+
+  const matches = (m) => m.batchId === input.batchId && m.delta === input.delta;
+  const prev = await replayRowChange(input, 'ADJUSTMENT', matches, opts.client);
+  if (prev) return prev;
+
+  try {
+    return await withTransaction(async (client) => {
+      const row = await lockRow(input.shopId, input.batchId, client);
+      const prior = await replayRowChange(input, 'ADJUSTMENT', matches, client);
+      if (prior) return prior;
+      if (row.version !== input.expectedVersion) {
+        throw new AppError('STALE_INVENTORY', undefined, {
+          expectedVersion: input.expectedVersion, currentVersion: row.version, quantity: row.quantity, reserved: row.reserved,
+        });
+      }
+      if (row.quantity + input.delta < row.reserved) {
+        throw new AppError('INSUFFICIENT_STOCK', 'Adjustment would leave less than the reserved units', {
+          quantity: row.quantity, reserved: row.reserved, delta: input.delta,
+        });
+      }
+      const r = await applyRowChange(row, 'ADJUSTMENT', input.delta, input, reason, client);
+      return { ...r, replayed: false };
+    }, { client: opts.client });
+  } catch (err) {
+    if (isIdemConflict(err)) {
+      const again = await replayRowChange(input, 'ADJUSTMENT', matches, opts.client);
+      if (again) return again;
+    }
+    throw err instanceof AppError ? err : mapPgError(err);
+  }
+}
+
+/**
+ * Write off expired or damaged stock (EXPIRY_WRITE_OFF). Reserved units can't
+ * be written off; release them first. `expectedVersion` is optional here.
+ *
+ * @param {{shopId:number, batchId:number, quantity?:number, expectedVersion?:number, reason:string,
+ *          performedBy:number, idempotencyKey?:string}} input   quantity defaults to all unreserved units
+ * @param {{client?: import('pg').PoolClient}} [opts]
+ * @returns {Promise<{inventory:Object, movement:Object, replayed:boolean}>}
+ * @throws STALE_INVENTORY, INSUFFICIENT_STOCK, REASON_REQUIRED, NOT_FOUND
+ */
+async function writeOff(input, opts = {}) {
+  if (!input || typeof input !== 'object') throw AppError.validation([{ field: 'input', issue: 'required' }]);
+  const errors = [];
+  checkId(input.shopId, 'shopId', errors);
+  checkId(input.batchId, 'batchId', errors);
+  checkId(input.performedBy, 'performedBy', errors);
+  if (input.quantity !== undefined && input.quantity !== null &&
+      (!Number.isInteger(input.quantity) || input.quantity <= 0 || input.quantity > MAX_QTY)) {
+    errors.push({ field: 'quantity', issue: `must be an integer from 1 to ${MAX_QTY}` });
+  }
+  if (input.expectedVersion !== undefined && input.expectedVersion !== null &&
+      (!Number.isInteger(input.expectedVersion) || input.expectedVersion < 0)) {
+    errors.push({ field: 'expectedVersion', issue: 'must be an integer >= 0' });
+  }
+  checkText(input.idempotencyKey, 'idempotencyKey', errors, 255);
+  if (errors.length) throw AppError.validation(errors);
+  const reason = requireReason(input.reason);
+
+  const matches = (m) => m.batchId === input.batchId && (input.quantity == null || -m.delta === input.quantity);
+  const prev = await replayRowChange(input, 'EXPIRY_WRITE_OFF', matches, opts.client);
+  if (prev) return prev;
+
+  try {
+    return await withTransaction(async (client) => {
+      const row = await lockRow(input.shopId, input.batchId, client);
+      const prior = await replayRowChange(input, 'EXPIRY_WRITE_OFF', matches, client);
+      if (prior) return prior;
+      if (input.expectedVersion != null && row.version !== input.expectedVersion) {
+        throw new AppError('STALE_INVENTORY', undefined, {
+          expectedVersion: input.expectedVersion, currentVersion: row.version, quantity: row.quantity, reserved: row.reserved,
+        });
+      }
+      const free = row.quantity - row.reserved;
+      const qty = input.quantity ?? free;
+      if (qty <= 0 || qty > free) {
+        throw new AppError('INSUFFICIENT_STOCK', 'Not enough unreserved units to write off', {
+          requested: qty, available: free, reserved: row.reserved,
+        });
+      }
+      const r = await applyRowChange(row, 'EXPIRY_WRITE_OFF', -qty, input, reason, client);
+      return { ...r, replayed: false };
+    }, { client: opts.client });
+  } catch (err) {
+    if (isIdemConflict(err)) {
+      const again = await replayRowChange(input, 'EXPIRY_WRITE_OFF', matches, opts.client);
+      if (again) return again;
+    }
+    throw err instanceof AppError ? err : mapPgError(err);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // getAvailable (B10)
 // ---------------------------------------------------------------------------
 
@@ -356,10 +748,9 @@ async function getAvailable(medicineId, filter = {}, opts = {}) {
 module.exports = {
   stockIn,
   getAvailable,
+  dispense,
+  adjust,
+  writeOff,
   reserve,
   release,
-  // stubs until Nov 10 (same signatures)
-  dispense: stub.dispense,
-  adjust: stub.adjust,
-  writeOff: stub.writeOff,
 };
