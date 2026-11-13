@@ -333,7 +333,7 @@ at once.
 `release` never takes `reserved` below 0, so calling it twice is safe. Held units can't be dispensed to
 walk-ins; `dispense({ reservation: lines })` takes exactly the held units and clears the hold.
 
-#### Stock routes (all need `Idempotency-Key`)
+#### Stock routes
 
 | Method & path | Who | Body → result |
 | --- | --- | --- |
@@ -341,8 +341,16 @@ walk-ins; `dispense({ reservation: lines })` takes exactly the held units and cl
 | POST /shops/:shopId/dispense | shop staff | `{ medicineId, quantity, requestId?, referralId?, reservation?, reason? }` → `{ lines: [{ batchId, batchNo, expiryDate, quantity, movementId, balanceAfter }], replayed }` |
 | POST /shops/:shopId/adjustments | shop OWNER | `{ batchId, delta, expectedVersion, reason }` → `{ inventory, movement, replayed }` |
 | POST /shops/:shopId/write-offs | shop OWNER | `{ batchId, quantity?, expectedVersion?, reason }` → `{ inventory, movement, replayed }` |
+| GET /shops/:shopId/inventory | shop staff | `?medicineId=&q=&expiring=90&expired=true&includeEmpty=true` → one row per batch, earliest expiry first, with `version` |
+| GET /shops/:shopId/movements | shop staff | `?batchId=&medicineId=&type=` → ledger, newest first |
+| GET /medicines/:id/availability | logged in | `?shopIds=1,2` → non-expired, unreserved units per active shop |
 
-ADMIN can use all of them. Errors: `422 BATCH_EXPIRED`, `409 BATCH_MISMATCH`, `409 INSUFFICIENT_STOCK`,
+To edit stock safely: read the row from `/inventory`, send its `version` as `expectedVersion`; if someone
+changed it meanwhile you get `409 STALE_INVENTORY` with the current version — reload and retry.
+Rows at 0 units are hidden unless `includeEmpty=true`; `expired=true` lists expired batches that still hold
+units, ready to write off.
+
+ADMIN can use all of them. POST routes need `Idempotency-Key`. Errors: `422 BATCH_EXPIRED`, `409 BATCH_MISMATCH`, `409 INSUFFICIENT_STOCK`,
 `409 STALE_INVENTORY`, `400 REASON_REQUIRED`, `409 SHOP_INACTIVE`, `409 MEDICINE_INACTIVE`,
 `422 IDEMPOTENCY_KEY_REUSED`, `403 NOT_SHOP_STAFF` / `NOT_SHOP_OWNER`. `getAvailable` only counts active shops.
 
@@ -384,7 +392,7 @@ await stock.dispense({ shopId, medicineId, quantity, requestId, performedBy, ide
 | 2 | Thu Nov 6 | Catalog services and routes: search, create, edit, deactivate, MEDICINE_IN_USE (B1–B3) ✅ |
 | 3 | Sat Nov 8 | Inventory + stock_movements (grants revoked); real stockIn (B4, B5, B7) ✅ |
 | 4 | Mon Nov 10 | Real dispense: FEFO, atomic update, batch-order locks, idempotency (B8); adjust, writeOff (B9) ✅ |
-| 5 | Wed Nov 12 | reserve/release, STALE_INVENTORY, availability helper (B10), inventory list route |
+| 5 | Wed Nov 12 | reserve/release, STALE_INVENTORY, availability helper (B10), inventory list route ✅ |
 | 6 | Fri Nov 14 | Thresholds (B11), expiryScan + lowStockScan jobs, post-dispense low-stock check (B12), seed stock |
 | 7 | Sun Nov 16 | FEFO + concurrent dispense tests, edge cases 3, 5, 6, 14, 15; merge to main |
 

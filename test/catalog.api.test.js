@@ -24,7 +24,8 @@ let doctor;
 
 const uniq = () => crypto.randomBytes(4).toString('hex');
 const key = () => `k-${uniq()}`;
-const days = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
+// Dates in India time, the same "today" the app uses for expiry.
+const days = (n) => new Date(Date.now() + 5.5 * 3600000 + n * 86400000).toISOString().slice(0, 10);
 
 async function api(method, path, { token, body, idem } = {}) {
   const headers = { 'content-type': 'application/json' };

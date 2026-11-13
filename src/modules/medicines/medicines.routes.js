@@ -12,6 +12,7 @@
  *   DELETE /medicines/:id                       ADMIN; 409 MEDICINE_IN_USE once it has a batch
  *   GET    /medicines/:id/batches?includeExpired=true   logged in
  *   POST   /medicines/:id/batches               ADMIN, Idempotency-Key
+ *   GET    /medicines/:id/availability?shopIds=1,2   logged in (B10: units per active shop)
  *
  * Non-admins only see active medicines.
  */
@@ -26,6 +27,7 @@ const { requireRole } = require('../../middleware/rbac');
 const { idempotency } = require('../../middleware/idempotency');
 const medicines = require('./medicine.service');
 const batches = require('./batch.service');
+const stock = require('../inventory/stock.service');
 
 const router = express.Router();
 router.use(authenticate);
@@ -147,6 +149,22 @@ router.post(
   idempotency(),
   asyncHandler(async (req, res) => {
     res.status(201).json(await medicines.addBatch(idParam(req.params.id, 'Medicine'), req.body));
+  })
+);
+
+// GET /medicines/:id/availability?shopIds=1,2 — non-expired, unreserved units per active shop (B10)
+router.get(
+  '/:id/availability',
+  asyncHandler(async (req, res) => {
+    const m = await loadVisible(req);
+    let shopIds;
+    if (req.query.shopIds !== undefined) {
+      shopIds = String(req.query.shopIds).split(',').filter(Boolean).map(Number);
+      if (shopIds.length === 0 || shopIds.length > 100 || shopIds.some((n) => !Number.isInteger(n) || n <= 0)) {
+        throw AppError.validation([{ field: 'shopIds', issue: 'must be a comma-separated list of shop ids' }]);
+      }
+    }
+    res.json({ medicineId: m.id, items: await stock.getAvailable(m.id, { shopIds }) });
   })
 );
 

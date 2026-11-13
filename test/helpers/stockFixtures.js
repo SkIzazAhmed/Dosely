@@ -12,7 +12,8 @@ const medicines = require('../../src/modules/medicines/medicine.service');
 const stock = require('../../src/modules/inventory/stock.service');
 
 const uniq = () => crypto.randomBytes(4).toString('hex');
-const days = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
+// Dates in India time, the same "today" the app uses for expiry.
+const days = (n) => new Date(Date.now() + 5.5 * 3600000 + n * 86400000).toISOString().slice(0, 10);
 
 async function adminId() {
   return (await pool.query(`SELECT id FROM users WHERE email = 'admin@dosely.dev'`)).rows[0].id;

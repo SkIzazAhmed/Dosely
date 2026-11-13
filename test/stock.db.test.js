@@ -25,7 +25,8 @@ let base;
 let adminId;
 
 const uniq = () => crypto.randomBytes(4).toString('hex');
-const days = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
+// Dates in India time, the same "today" the app uses for expiry.
+const days = (n) => new Date(Date.now() + 5.5 * 3600000 + n * 86400000).toISOString().slice(0, 10);
 
 /** A fresh active shop (inventory.shop_id references shops). */
 async function newShop() {
