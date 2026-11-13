@@ -7,6 +7,7 @@
  */
 
 const { query } = require('../../db/pool');
+const { AVAILABLE_SQL } = require('./threshold.service');
 
 const COLUMNS = 'id, shop_id, batch_id, quantity, reserved, version, is_active, created_at, updated_at';
 
@@ -67,7 +68,7 @@ const TODAY_SQL = `(now() AT TIME ZONE 'Asia/Kolkata')::date`;
  * @param {number}  [f.expiring]       only non-expired batches expiring within N days
  * @param {boolean} [f.expired]        only expired batches that still hold units (to write off)
  * @param {boolean} [f.includeEmpty]   include rows at quantity 0 (default false)
- * @param {string}  [f.extraWhere]     extra SQL condition on alias i / b / m (used by the low-stock filter)
+ * @param {boolean} [f.low]            only medicines below this shop's threshold (B11)
  */
 async function listForShop(shopId, f = {}, { limit = 50, offset = 0 } = {}) {
   const where = ['i.shop_id = $1', 'i.is_active'];
@@ -83,7 +84,12 @@ async function listForShop(shopId, f = {}, { limit = 50, offset = 0 } = {}) {
   }
   if (f.expired) where.push(`b.expiry_date <= ${TODAY_SQL}`);
   if (!f.includeEmpty || f.expired) where.push('i.quantity > 0');
-  if (f.extraWhere) where.push(f.extraWhere);
+  if (f.low) {
+    where.push(`EXISTS (
+      SELECT 1 FROM stock_thresholds t
+       WHERE t.shop_id = i.shop_id AND t.medicine_id = b.medicine_id AND t.is_active
+         AND ${AVAILABLE_SQL('t.shop_id', 't.medicine_id')} < t.min_quantity)`);
+  }
 
   const from = `
     FROM inventory i

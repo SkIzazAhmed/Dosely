@@ -24,6 +24,7 @@ const medicines = require('../medicines/medicine.service');
 const batches = require('../medicines/batch.service');
 const inventoryModel = require('./inventory.model');
 const movementModel = require('./movement.model');
+const alerts = require('./alert.service');
 
 const MAX_QTY = 1000000;
 
@@ -571,8 +572,13 @@ async function dispense(input, opts = {}) {
   }
 }
 
-/** Hook run inside the dispense transaction (post-dispense low-stock check lands Nov 14). */
-async function afterDispense(input, client) { // eslint-disable-line no-unused-vars
+/**
+ * Post-dispense low-stock check (B12), inside the dispense transaction: if the
+ * medicine just fell below the shop's threshold, alert the shop — at most
+ * once per shop + medicine per day (edge case 14).
+ */
+async function afterDispense(input, client) {
+  await alerts.checkLowStock(input.shopId, input.medicineId, { client });
 }
 
 // ---------------------------------------------------------------------------
