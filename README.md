@@ -5,26 +5,75 @@ Platform & People (setup, auth, users, shops, patients, phones, notifications): 
 
 ## Setup
 
-Requires Node 20+ and PostgreSQL 14+.
+You need **Node 20+** and **PostgreSQL 14+**.
+On a Mac: `brew install node postgresql@16 && brew services start postgresql@16`.
 
 ```bash
+# 1. Get the code and install packages
 git clone https://github.com/SkIzazAhmed/Dosely.git && cd Dosely
 npm install
-cp .env.example .env            # edit DATABASE_URL
+
+# 2. Point it at a database
+cp .env.example .env            # then edit DATABASE_URL (user, password, port)
 createdb pharmacy_mvp           # or: psql -c 'CREATE DATABASE pharmacy_mvp'
-npm run migrate                 # apply db/migrations/*.sql
-npm run seed                    # demo users, shops, staff, patients
-npm start                       # http://localhost:3000/health
+
+# 3. Create the tables and demo data
+npm run migrate                 # applies src/db/migrations/*.sql in order
+npm run seed                    # demo users, shops, staff, patients, phones, medicines, stock
+
+# 4. Run it
+npm start                       # http://localhost:3000/health → {"status":"ok","db":"up"}
 ```
+
+Check it works — log in as the demo doctor (password for every demo user: `Dosely@123`):
+
+```bash
+curl -s -X POST localhost:3000/auth/login -H 'content-type: application/json' \
+  -d '{"email":"doctor@dosely.dev","password":"Dosely@123"}'
+```
+
+**After `git pull`:** run `npm install && npm run migrate && npm run seed` again. Migrations only apply what's new,
+and seeds skip anything that already exists, so this is always safe.
+
+**Run the tests:** `npm test`. They need the database from `.env`; they add their own users, shops and patients with
+random names, so they don't disturb the demo data (but use a separate database if you want it spotless:
+`createdb dosely_test && DATABASE_URL=postgres://…/dosely_test npm test`).
 
 | Script | What it does |
 | --- | --- |
-| `npm start` / `npm run dev` | run the server (dev = auto-restart) |
+| `npm start` / `npm run dev` | run the server (dev = auto-restart on file changes) |
 | `npm run migrate` | apply pending migrations |
 | `npm run migrate:status` | list applied `[x]` and pending `[ ]` migrations |
 | `npm run seed` | run `src/db/seeds/*.js` (idempotent) |
-| `npm run jobs:notifications` | run the SMS/email delivery job on its own (`-- --once` for one pass); the API runs it too unless `NOTIFY_WORKER=off` |
-| `npm test` | unit + DB tests (DB tests skip if Postgres isn't reachable; they add users with random emails) |
+| `npm run db:setup` | migrate + seed |
+| `npm test` | all unit and database tests (database tests are skipped if Postgres isn't reachable) |
+| `npm run jobs:notifications` | SMS/email delivery job on its own (`-- --once` for one pass) |
+| `npm run jobs:once` | request/referral jobs once |
+| `npm run job:expiry`, `npm run job:low-stock` | daily stock jobs once |
+
+### Background jobs
+
+`npm start` runs these inside the server. Each has its own switch in `.env`:
+
+| Jobs | Owner | Default | Switch |
+| --- | --- | --- | --- |
+| Notification delivery: SMS/email sending, retries (every 5 s) | Izaz | on | `NOTIFY_WORKER=off` |
+| Requests/referrals: expiry, holds, reminders, patient SMS batches | Anushka | on | `JOBS_DISABLED=true` |
+| Stock: expiryScan + lowStockScan (daily 06:00 India time) | Rachana | off | `ENABLE_JOBS=true` |
+
+In development SMS and email are **stubs**: they're printed in the server log as `[SMS stub] → +91… : …`,
+never really sent.
+
+### If something goes wrong
+
+| Problem | Fix |
+| --- | --- |
+| `password authentication failed` / `ECONNREFUSED` | `DATABASE_URL` in `.env` doesn't match your Postgres user, password or port. Homebrew Postgres usually needs `postgres://<your-mac-username>@localhost:5432/pharmacy_mvp` |
+| `database "pharmacy_mvp" does not exist` | `createdb pharmacy_mvp` |
+| `Migration … was changed after it was applied` | someone edited an applied migration; `git checkout` that file and add a new migration instead (or start a fresh database) |
+| `/health` says `"db":"down"` | Postgres isn't running: `brew services start postgresql@16` |
+| Port 3000 in use | `PORT=3001 npm start` |
+| Login says `INVALID_CREDENTIALS` for demo users | run `npm run seed`; check `SEED_PASSWORD` in `.env` |
 
 ## Layout
 
@@ -165,6 +214,10 @@ Who can manage numbers: **users** — themselves or ADMIN; **patients** — DOCT
 | P8 | First number becomes primary | — |
 | P9 | New primary unsets the old one in the same transaction | — |
 | P10 | Primary can't be removed while others exist | 409 PHONE_PRIMARY_REQUIRED |
+
+**Edge cases 4, 9, 10** are covered end to end in `test/edge-cases.izaz.test.js`: duplicate numbers in any
+spelling (4), bad formats rejected at every input and no SMS to unverified, landline or unreachable numbers (9), and
+patients with no phone at all (10) — including what Anushka's referral flow sees (`getUsablePhone` → `null` → slip).
 
 Demo numbers (seed 003): users `+91 99000 0000{1–5}` (doctor@, shopkeeper@, staff@, owner.kor@, owner.ind@ — all verified,
 so `POST /auth/login { "phone": "9900000001", "password": "Dosely@123" }` works); Jayanagar shop landline `+91 80 2663 0000`;
@@ -548,4 +601,4 @@ the only piece still on a stub is `stock.dispense` (Rachana).
 | 4 | Mon Nov 10 | Phone numbers, validator, CRUD, rules P1–P10 ✅ |
 | 5 | Wed Nov 12 | Rules P11–P13, verify route, real notification.service + inbox ✅ |
 | 6 | Fri Nov 14 | SMS/email channels, retries with backoff, unreachable after 3 failures ✅ |
-| 7 | Sun Nov 16 | Edge-case tests 4, 9, 10, fixes, README, merge to main |
+| 7 | Sun Nov 16 | Edge-case tests 4, 9, 10, fixes, README, merge to main ✅ |
