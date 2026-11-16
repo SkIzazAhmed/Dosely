@@ -25,8 +25,10 @@ const batches = require('../medicines/batch.service');
 const inventoryModel = require('./inventory.model');
 const movementModel = require('./movement.model');
 const alerts = require('./alert.service');
+const { planFefo } = require('./fefo');
 
 const MAX_QTY = 1000000;
+const MAX_KEY = 512; // stock_movements.idempotency_key (migration 013)
 
 function checkId(v, field, errors, { required = true } = {}) {
   if (v === undefined || v === null) {
@@ -78,7 +80,7 @@ function validateStockIn(input) {
     errors.push({ field: 'quantity', issue: `must be an integer from 1 to ${MAX_QTY}` });
   }
   checkText(input.reason, 'reason', errors, 500);
-  checkText(input.idempotencyKey, 'idempotencyKey', errors, 255);
+  checkText(input.idempotencyKey, 'idempotencyKey', errors, MAX_KEY);
 
   let batch = null;
   try {
@@ -221,24 +223,16 @@ async function reserve(input, opts = {}) {
           FOR UPDATE OF i`,
         [input.shopId, input.medicineId]
       );
-      const fefo = rows
-        .filter((r) => r.free > 0)
-        .sort((a, b) => (a.expiry_date < b.expiry_date ? -1 : a.expiry_date > b.expiry_date ? 1 : a.batch_id - b.batch_id));
-      const available = fefo.reduce((n, r) => n + r.free, 0);
-      if (available < input.quantity) {
+      const { available, enough, plan: picked } = planFefo(
+        rows.map((r) => ({ batchId: Number(r.batch_id), expiryDate: r.expiry_date, free: r.free, r })),
+        input.quantity
+      );
+      if (!enough) {
         throw new AppError('INSUFFICIENT_STOCK', undefined, {
           shopId: input.shopId, medicineId: input.medicineId, requested: input.quantity, available,
         });
       }
-
-      const plan = [];
-      let left = input.quantity;
-      for (const r of fefo) {
-        if (left === 0) break;
-        const qty = Math.min(left, r.free);
-        plan.push({ r, qty });
-        left -= qty;
-      }
+      const plan = picked.map((p) => ({ r: p.row.r, qty: p.quantity }));
 
       await inventoryModel.enableStockWrites(client);
       for (const { r, qty } of [...plan].sort((a, b) => a.r.batch_id - b.r.batch_id)) {
@@ -383,7 +377,7 @@ function validateDispense(input) {
   if (input.idempotencyKey === undefined || input.idempotencyKey === null || input.idempotencyKey === '') {
     errors.push({ field: 'idempotencyKey', issue: 'required' });
   } else {
-    checkText(input.idempotencyKey, 'idempotencyKey', errors, 255);
+    checkText(input.idempotencyKey, 'idempotencyKey', errors, MAX_KEY);
   }
   checkId(input.requestId, 'requestId', errors, { required: false });
   checkId(input.referralId, 'referralId', errors, { required: false });
@@ -506,23 +500,16 @@ async function dispense(input, opts = {}) {
         // A racing request with the same key may have committed while we waited for the locks.
         const prior = await replayDispense(input, client);
         if (prior) return prior;
-        const fefo = rows
-          .filter((r) => r.quantity - r.reserved > 0)
-          .sort((a, b) => (a.expiry_date < b.expiry_date ? -1 : a.expiry_date > b.expiry_date ? 1 : a.batch_id - b.batch_id));
-        const available = fefo.reduce((n, r) => n + r.quantity - r.reserved, 0);
-        if (available < input.quantity) {
+        const { available, enough, plan: picked } = planFefo(
+          rows.map((r) => ({ batchId: Number(r.batch_id), expiryDate: r.expiry_date, free: r.quantity - r.reserved, r })),
+          input.quantity
+        );
+        if (!enough) {
           throw new AppError('INSUFFICIENT_STOCK', undefined, {
             shopId: input.shopId, medicineId: input.medicineId, requested: input.quantity, available,
           });
         }
-        plan = [];
-        let left = input.quantity;
-        for (const r of fefo) {
-          if (left === 0) break;
-          const qty = Math.min(left, r.quantity - r.reserved);
-          plan.push({ r, qty, fromReserved: false });
-          left -= qty;
-        }
+        plan = picked.map((p) => ({ r: p.row.r, qty: p.quantity, fromReserved: false }));
       }
 
       await inventoryModel.enableStockWrites(client);
@@ -608,7 +595,7 @@ async function adjust(input, opts = {}) {
   if (!Number.isInteger(input.expectedVersion) || input.expectedVersion < 0) {
     errors.push({ field: 'expectedVersion', issue: 'required: the inventory version you read' });
   }
-  checkText(input.idempotencyKey, 'idempotencyKey', errors, 255);
+  checkText(input.idempotencyKey, 'idempotencyKey', errors, MAX_KEY);
   if (errors.length) throw AppError.validation(errors);
   const reason = requireReason(input.reason);
 
@@ -667,7 +654,7 @@ async function writeOff(input, opts = {}) {
       (!Number.isInteger(input.expectedVersion) || input.expectedVersion < 0)) {
     errors.push({ field: 'expectedVersion', issue: 'must be an integer >= 0' });
   }
-  checkText(input.idempotencyKey, 'idempotencyKey', errors, 255);
+  checkText(input.idempotencyKey, 'idempotencyKey', errors, MAX_KEY);
   if (errors.length) throw AppError.validation(errors);
   const reason = requireReason(input.reason);
 
