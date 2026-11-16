@@ -4,7 +4,8 @@
  * Phone routes for each owner type (A9):
  *   GET    /{users|patients|shops}/:ownerId/phones
  *   POST   /{users|patients|shops}/:ownerId/phones            { number, label?, isPrimary? }
- *   PATCH  /{users|patients|shops}/:ownerId/phones/:phoneId   { label?, isPrimary? }
+ *   PATCH  /{users|patients|shops}/:ownerId/phones/:phoneId   { number?, label?, isPrimary? }  (new digits reset verification, P12)
+ *   POST   /phones/:phoneId/verify                             staff confirmation (F5.3)
  *   DELETE /{users|patients|shops}/:ownerId/phones/:phoneId   (deactivates)
  *
  * Who may read / write:
@@ -89,6 +90,7 @@ function phoneRouter(ownerType, { beforeAdd } = {}) {
       const phoneId = idParam(req.params.phoneId, 'Phone number');
       await loadOwnPhone(ownerType, ownerId, phoneId);
       const patch = validate(req.body, {
+        number: { type: 'string', max: 30 },
         label: { type: 'enum', values: LABELS },
         isPrimary: { type: 'boolean' },
       }, { partial: true });

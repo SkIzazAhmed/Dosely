@@ -4,6 +4,7 @@ const config = require('./config');
 const { createApp } = require('./app');
 const db = require('./db/pool');
 const jobs = require('./jobs');
+const retryNotifications = require('./jobs/retryNotifications');
 
 const app = createApp();
 const server = app.listen(config.port, () => {
@@ -13,6 +14,10 @@ const server = app.listen(config.port, () => {
 // Request + referral jobs (expiry, holds, reminders, patient SMS); JOBS_DISABLED=true turns them off
 const jobRunner = process.env.JOBS_DISABLED === 'true' ? null : jobs.start();
 
+// Deliver SMS / EMAIL notifications in-process unless NOTIFY_WORKER=off (A11)
+const notifyWorker = config.notifications.worker ? retryNotifications.start() : null;
+if (notifyWorker) console.log('[server] notification delivery job running (NOTIFY_WORKER=off to disable)');
+
 let shuttingDown = false;
 async function shutdown(signal) {
   if (shuttingDown) return;
@@ -20,6 +25,7 @@ async function shutdown(signal) {
   console.log(`[server] ${signal} received, shutting down`);
   if (jobRunner) jobRunner.stop();
   server.close(async () => {
+    if (notifyWorker) await notifyWorker.stop();
     await db.close().catch(() => {});
     process.exit(0);
   });
