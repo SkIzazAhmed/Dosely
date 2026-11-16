@@ -468,6 +468,8 @@ one `{ from, to, actor, guard }` table each. Any other move throws `409 INVALID_
 | GET /requests?shopId= | shop staff, ADMIN | shop inbox, open statuses first |
 | GET /requests/:id | sender, shop staff, ADMIN | one request |
 | POST /requests/:id/acknowledge | shop staff, ADMIN | only from `SENT`, before expiry |
+| POST /requests/:id/dispense | shop staff, ADMIN | `{ quantity }`, Idempotency-Key required; from `ACKNOWLEDGED`/`PARTIALLY_FULFILLED`, at most the unfulfilled qty; partial → `PARTIALLY_FULFILLED`, last units → `FULFILLED` |
+| GET /inventory/availability | any logged-in user | `?medicine_id&min_qty[&near_shop_id][&limit]` — shops with ≥ min_qty non-expired, unreserved units, ranked by distance from `near_shop_id`, then same pincode, then same area |
 | POST /requests/:id/close | shop staff, ADMIN | `{ reason }` (1–500 chars, else `400 CLOSE_REASON_REQUIRED`); from `ACKNOWLEDGED` or `PARTIALLY_FULFILLED` |
 | POST /requests/:id/cancel | sending doctor, ADMIN | `{ reason? }`; cancels live referrals and releases held stock |
 
@@ -477,8 +479,52 @@ Any status change the state machine doesn't allow (wrong status, or a failing gu
 expired") is `409 INVALID_TRANSITION` with `details: { from, to, actor, reason }`. Acknowledge is a
 conditional update, so it can't race the expiry job. The action routes accept an optional `Idempotency-Key`.
 
+A new request's `REQUEST_CREATED` notification (and the 201 body, as `alternatives`) lists the top 3 other
+shops that can cover the shortfall (requested − available at the shop).
+
+`POST /requests/:id/dispense` calls `stock.dispense` exactly as the stock.service contract says. Until
+Rachana's real `dispense` lands it is her in-memory stub, which can't see real stock, so the API tests swap in a
+recording stand-in for that one function.
+
 Until Izaz's `shops` / `shop_staff` tables land, `src/modules/requests/shopAccess.js` runs as a stub
 (any shop id is active, any SHOPKEEPER is staff of every shop) and switches to the real checks by itself.
+
+### Referrals API
+
+| Method & path | Who | What |
+| --- | --- | --- |
+| POST /requests/:id/referrals | origin shop staff, ADMIN | `{ toShopId, quantity }`, Idempotency-Key required. From `ACKNOWLEDGED`, `PARTIALLY_FULFILLED` or `REFERRED`; target must be active and have the units now (else `409 INSUFFICIENT_STOCK` with `details.available`). Request → `REFERRED` |
+| GET /requests/:id/referrals | anyone who can see the request | the request's referrals |
+| GET /referrals?shopId=&status= | target shop staff, ADMIN | referral inbox, live ones first |
+| GET /referrals/:id | origin or target staff, ADMIN | one referral |
+| POST /referrals/:id/accept | target shop staff | reserves the units through `stock.reserve` and holds them for `REFERRAL_HOLD_HOURS` (default 24) |
+| POST /referrals/:id/reject | target shop staff | `{ reason }` required (`400 REJECT_REASON_REQUIRED`) |
+| POST /referrals/:id/cancel | origin shop staff | `{ reason? }`; releases held stock through `stock.release` |
+| POST /referrals/:id/fulfil | target shop staff | `{ requestNo, phoneLast5? }`, Idempotency-Key required. Request number + last 5 digits of the patient's phone (request number alone for a slip patient), else `403 REFERRAL_VERIFICATION_FAILED`; dispenses the held units and raises the request's fulfilled qty |
+| GET /referrals/:id/slip | origin or target staff | printable slip (shop name, address, request no.); `Accept: text/plain` for plain text |
+
+Limits (C7): at most 3 referrals per request (`REFERRAL_LIMIT_REACHED`), one live referral per target shop
+(`REFERRAL_DUPLICATE`), live referred quantity ≤ unfulfilled (`REFERRAL_QTY_EXCEEDED`). When a request's last
+live referral ends it steps back to `PARTIALLY_FULFILLED` (something dispensed) or `ACKNOWLEDGED`. Target and
+origin shops get in-app notifications for sent, accepted, rejected and cancelled referrals.
+
+### Patient messages and jobs
+
+- **C10:** when a referral is accepted and the patient has a usable phone, a message is queued; one SMS per
+  patient and prescription goes out 10 minutes after the first one was queued, so referrals accepted within
+  that window share one SMS (≤ 160 chars). No usable phone, or no patient on the request → the accept
+  response carries a printable slip (`patientContact.method = 'SLIP'`). Table `patient_referral_messages`
+  (migration 022).
+- **C11:** `src/jobs/` — `expireRequests` (SENT past expiry → EXPIRED, doctor told), `expireReferralHolds`
+  (ACCEPTED past hold → NO_SHOW, stock released, request steps back), `remindPendingReferrals` (PENDING for
+  2 h → one reminder to the origin shop), all every 5 min, and `sendPatientReferralSms` every minute.
+  `src/server.js` starts them unless `JOBS_DISABLED=true`; each run holds a PostgreSQL advisory lock, so only
+  one instance runs a job at a time. `npm run jobs:once` runs them all once.
+
+A patient's usable phone (`src/modules/referrals/patientPhone.js`, on Izaz's `phones.service`) is their primary
+number if it is SMS-capable (verified mobile), else their first other SMS-capable number. An unverified number
+(edge case 9) or no number (edge case 10) means a slip. Patient SMS and shop notifications go through Izaz's real `notification.service`;
+the only piece still on a stub is `stock.dispense` (Rachana).
 
 ### Commit plan (Anushka)
 
@@ -487,9 +533,9 @@ Until Izaz's `shops` / `shop_staff` tables land, `src/modules/requests/shopAcces
 | 1 | Tue Nov 4 | Migrations for stock_requests and referrals; request.state.js transition table ✅ |
 | 2 | Thu Nov 6 | Create request (snapshot, number, urgency, expiry), doctor list, shop inbox (C1–C3) ✅ |
 | 3 | Sat Nov 8 | Guards for every transition; acknowledge, close, cancel routes; state machine tests (C4, C5) ✅ |
-| 4 | Mon Nov 10 | Availability lookup with ranking; dispense against a request (C6) |
-| 5 | Wed Nov 12 | Referrals: create, accept with hold, reject, cancel (C7, C8) |
-| 6 | Fri Nov 14 | Pickup verification, patient SMS batching + slip, expiry jobs, 2-hour reminder (C9–C11) |
+| 4 | Mon Nov 10 | Availability lookup with ranking; dispense against a request (C6) ✅ |
+| 5 | Wed Nov 12 | Referrals: create, accept with hold, reject, cancel (C7, C8) ✅ |
+| 6 | Fri Nov 14 | Pickup verification, patient SMS batching + slip, expiry jobs, 2-hour reminder (C9–C11) ✅ |
 | 7 | Sun Nov 16 | Referral flow integration test, edge cases 1, 2, 7, 8, 11, 12, 13, 16; merge to main |
 
 ## Commit plan (Izaz)
