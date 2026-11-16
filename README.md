@@ -299,7 +299,8 @@ Migrations `010`–`019` are claimed for catalog + stock.
 - `011`: `inventory` (one row per shop + batch: `quantity >= 0`, `0 <= reserved <= quantity`, `version`)
   and the `stock_movements` ledger, both referencing `shops`. `request_id` and `referral_id` have no
   foreign keys yet (`020` runs after `011`); a later migration adds them.
-- `stock_thresholds` lands Nov 14.
+- `012`: `stock_thresholds` (per shop + medicine reorder level) and `stock_alerts` (one row per alert sent;
+  its unique index is what stops repeats), plus `medicine_batches.expired_flagged_at`.
 
 - Generic names are unique ignoring case. Medicines are unique on brand + manufacturer + form + strength;
   `prescription_required` defaults to true.
@@ -336,25 +337,66 @@ Migrations `010`–`019` are claimed for catalog + stock.
 `src/modules/inventory/stock.service.js` is the **only** code that changes stock. Every function takes
 `opts = { client }` last to join your transaction (SAVEPOINT). Full JSDoc is in the file.
 
-| Function | Status |
-| --- | --- |
-| `stockIn` | **real** since Nov 8 |
-| `getAvailable` | **real** since Nov 8 (brought forward from Nov 12 so lookups see real stock) |
-| `reserve`, `release` | **real** since Nov 8 (brought forward so referral holds use real stock) |
-| `dispense`, `adjust`, `writeOff` | stub until Nov 10 |
+All seven functions are real (`stockIn`, `getAvailable`, `reserve`, `release` since Nov 8; `dispense`,
+`adjust`, `writeOff` since Nov 10).
 
-The stubs live in `stock.stub.js`: they validate input like the real service and keep their own stock in
-memory (FEFO, `INSUFFICIENT_STOCK`, `STALE_INVENTORY`, idempotent replays), so they **don't** see stock
-received through the real `stockIn` yet.
+How it never oversells: `dispense` and `reserve` lock the medicine's inventory rows in `batch_id` order (so
+multi-batch calls can't deadlock), pick earliest-expiry first, and every update is conditional on the stock
+still being there. When two callers race for the last units, one wins and the other gets
+`409 INSUFFICIENT_STOCK`. The same idempotency key never changes stock twice, even when both requests arrive
+at once.
 
-`reserve` locks rows in `batch_id` order (as `dispense` will), so two referrals racing for the last units
-can't both win. Call it once per referral (inside the PENDING → ACCEPTED transition) and keep its `lines`;
-`release` never takes `reserved` below 0, so calling it twice is safe.
+`reserve`: call it once per referral (inside the PENDING → ACCEPTED transition) and keep its `lines`;
+`release` never takes `reserved` below 0, so calling it twice is safe. Held units can't be dispensed to
+walk-ins; `dispense({ reservation: lines })` takes exactly the held units and clears the hold.
 
-`POST /shops/:shopId/stock-in` (any active staff of the shop, or ADMIN; `Idempotency-Key` required):
-`{ medicineId, batchNo, manufactureDate?, expiryDate, mrp, quantity, reason? }` → `201 { batch, batchCreated,
-inventory, movement, replayed }`. Errors: `422 BATCH_EXPIRED`, `409 BATCH_MISMATCH`, `409 SHOP_INACTIVE`,
-`409 MEDICINE_INACTIVE`, `403 NOT_SHOP_STAFF`. `getAvailable` only counts active shops.
+#### Stock routes
+
+| Method & path | Who | Body → result |
+| --- | --- | --- |
+| POST /shops/:shopId/stock-in | shop staff | `{ medicineId, batchNo, manufactureDate?, expiryDate, mrp, quantity, reason? }` → `{ batch, batchCreated, inventory, movement, replayed }` |
+| POST /shops/:shopId/dispense | shop staff | `{ medicineId, quantity, requestId?, referralId?, reservation?, reason? }` → `{ lines: [{ batchId, batchNo, expiryDate, quantity, movementId, balanceAfter }], replayed }` |
+| POST /shops/:shopId/adjustments | shop OWNER | `{ batchId, delta, expectedVersion, reason }` → `{ inventory, movement, replayed }` |
+| POST /shops/:shopId/write-offs | shop OWNER | `{ batchId, quantity?, expectedVersion?, reason }` → `{ inventory, movement, replayed }` |
+| GET /shops/:shopId/inventory | shop staff | `?medicineId=&q=&expiring=90&expired=true&includeEmpty=true` → one row per batch, earliest expiry first, with `version` |
+| GET /shops/:shopId/movements | shop staff | `?batchId=&medicineId=&type=` → ledger, newest first |
+| GET /medicines/:id/availability | logged in | `?shopIds=1,2` → non-expired, unreserved units per active shop |
+| GET /shops/:shopId/thresholds | shop staff | `?low=true` → reorder levels with `available` and `isLow` |
+| PUT /shops/:shopId/thresholds/:medicineId | shop OWNER | `{ minQuantity }` (create or change) |
+| DELETE /shops/:shopId/thresholds/:medicineId | shop OWNER | |
+
+`GET /shops/:shopId/inventory?low=true` lists the batches of medicines that are below the shop's threshold.
+
+#### Alerts and daily jobs (B12)
+
+A medicine is **low** at a shop when its non-expired, unreserved units are below the shop's threshold.
+
+| Alert | Sent by | At most |
+| --- | --- | --- |
+| `LOW_STOCK` | `dispense` (right after stock drops below the threshold) and `lowStockScan` | once per shop + medicine per day |
+| `EXPIRY_ALERT` | `expiryScan`, batches expiring within 90 days | once per shop + batch per week |
+| `BATCH_EXPIRED` | `expiryScan`, expired batches still holding units ("write them off") | once per shop + batch |
+
+Alerts go to every active staff member of the shop through `notification.service.notifyShop` (IN_APP).
+Each one is first recorded in `stock_alerts`; a repeat in the same period records and sends nothing,
+even if two jobs overlap. The post-dispense check runs inside the dispense transaction, so a rolled-back
+dispense leaves no alert. `expiryScan` also stamps newly expired batches with `expired_flagged_at`.
+
+Run the jobs by hand with `npm run job:expiry` and `npm run job:low-stock`, or set `ENABLE_JOBS=true` and
+the server runs both every day at 06:00 India time (and once shortly after start-up).
+
+`npm run seed` adds demo stock: 10 common medicines (Dolo 650, Pan 40, Azithral 500, …) with batches at
+Jayanagar, Koramangala and Indiranagar, a few expiring within 90 days, and thresholds where Dolo 650 and
+Azithral 500 are low at Jayanagar. Re-running it adds nothing.
+
+To edit stock safely: read the row from `/inventory`, send its `version` as `expectedVersion`; if someone
+changed it meanwhile you get `409 STALE_INVENTORY` with the current version — reload and retry.
+Rows at 0 units are hidden unless `includeEmpty=true`; `expired=true` lists expired batches that still hold
+units, ready to write off.
+
+ADMIN can use all of them. POST routes need `Idempotency-Key`. Errors: `422 BATCH_EXPIRED`, `409 BATCH_MISMATCH`, `409 INSUFFICIENT_STOCK`,
+`409 STALE_INVENTORY`, `400 REASON_REQUIRED`, `409 SHOP_INACTIVE`, `409 MEDICINE_INACTIVE`,
+`422 IDEMPOTENCY_KEY_REUSED`, `403 NOT_SHOP_STAFF` / `NOT_SHOP_OWNER`. `getAvailable` only counts active shops.
 
 ```js
 const stock = require('../inventory/stock.service');
@@ -393,9 +435,9 @@ await stock.dispense({ shopId, medicineId, quantity, requestId, performedBy, ide
 | 1 | Tue Nov 4 | Migrations for generics, medicines, batches; stock.service stub with agreed signatures ✅ |
 | 2 | Thu Nov 6 | Catalog services and routes: search, create, edit, deactivate, MEDICINE_IN_USE (B1–B3) ✅ |
 | 3 | Sat Nov 8 | Inventory + stock_movements (grants revoked); real stockIn (B4, B5, B7) ✅ |
-| 4 | Mon Nov 10 | Real dispense: FEFO, atomic update, batch-order locks, idempotency (B8); adjust, writeOff (B9) |
-| 5 | Wed Nov 12 | reserve/release, STALE_INVENTORY, availability helper (B10), inventory list route |
-| 6 | Fri Nov 14 | Thresholds (B11), expiryScan + lowStockScan jobs, post-dispense low-stock check (B12), seed stock |
+| 4 | Mon Nov 10 | Real dispense: FEFO, atomic update, batch-order locks, idempotency (B8); adjust, writeOff (B9) ✅ |
+| 5 | Wed Nov 12 | reserve/release, STALE_INVENTORY, availability helper (B10), inventory list route ✅ |
+| 6 | Fri Nov 14 | Thresholds (B11), expiryScan + lowStockScan jobs, post-dispense low-stock check (B12), seed stock ✅ |
 | 7 | Sun Nov 16 | FEFO + concurrent dispense tests, edge cases 3, 5, 6, 14, 15; merge to main |
 
 ## Requests and referrals (Anushka)

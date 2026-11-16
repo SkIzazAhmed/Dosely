@@ -14,6 +14,9 @@ const server = app.listen(config.port, () => {
 const notifyWorker = config.notifications.worker ? retryNotifications.start() : null;
 if (notifyWorker) console.log('[server] notification delivery job running (NOTIFY_WORKER=off to disable)');
 
+// Daily stock jobs (expiryScan, lowStockScan) — Rachana, B12
+const stockJobs = process.env.ENABLE_JOBS === 'true' ? require('./jobs/scheduler').start() : null;
+
 let shuttingDown = false;
 async function shutdown(signal) {
   if (shuttingDown) return;
@@ -21,6 +24,7 @@ async function shutdown(signal) {
   console.log(`[server] ${signal} received, shutting down`);
   server.close(async () => {
     if (notifyWorker) await notifyWorker.stop();
+    if (stockJobs) stockJobs.stop();
     await db.close().catch(() => {});
     process.exit(0);
   });
