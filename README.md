@@ -482,9 +482,18 @@ conditional update, so it can't race the expiry job. The action routes accept an
 A new request's `REQUEST_CREATED` notification (and the 201 body, as `alternatives`) lists the top 3 other
 shops that can cover the shortfall (requested − available at the shop).
 
-`POST /requests/:id/dispense` calls `stock.dispense` exactly as the stock.service contract says. Until
-Rachana's real `dispense` lands it is her in-memory stub, which can't see real stock, so the API tests swap in a
-recording stand-in for that one function.
+`POST /requests/:id/dispense` calls `stock.dispense` exactly as the stock.service contract says.
+
+### Tests (Anushka)
+
+- `test/referral.flow.integration.test.js` — the whole flow through the API with every real service: request →
+  partial dispense → lookup → referral → accept (hold) → batched patient SMS → verified pickup → `FULFILLED`, with
+  the stock ledger checked; and the no-show path (hold expires → stock released → refer elsewhere → pickup).
+- `test/requests.edgecases.test.js` — one test per owned edge case: 1, 2, 7, 8, 11, 12, 13, 16.
+- `test/request.state.test.js` — every allowed and refused transition and every guard.
+- `test/requests.api.test.js`, `test/referrals.api.test.js`, `test/fulfilment.test.js`, `test/availability.test.js`,
+  `test/requests.db.test.js` — routes, rules and DB checks. A few of these swap `stock.dispense` for a recording
+  stand-in to check exactly what is passed to it; the two files above use the real one.
 
 Until Izaz's `shops` / `shop_staff` tables land, `src/modules/requests/shopAccess.js` runs as a stub
 (any shop id is active, any SHOPKEEPER is staff of every shop) and switches to the real checks by itself.
@@ -523,8 +532,8 @@ origin shops get in-app notifications for sent, accepted, rejected and cancelled
 
 A patient's usable phone (`src/modules/referrals/patientPhone.js`, on Izaz's `phones.service`) is their primary
 number if it is SMS-capable (verified mobile), else their first other SMS-capable number. An unverified number
-(edge case 9) or no number (edge case 10) means a slip. Patient SMS and shop notifications go through Izaz's real `notification.service`;
-the only piece still on a stub is `stock.dispense` (Rachana).
+(edge case 9) or no number (edge case 10) means a slip. Patient SMS and shop notifications go through Izaz's real
+`notification.service`, and dispensing goes through Rachana's real `stock.dispense` — nothing is on a stub any more.
 
 ### Commit plan (Anushka)
 
