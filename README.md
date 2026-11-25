@@ -354,6 +354,8 @@ Migrations `010`–`019` are claimed for catalog + stock.
   foreign keys yet (`020` runs after `011`); a later migration adds them.
 - `012`: `stock_thresholds` (per shop + medicine reorder level) and `stock_alerts` (one row per alert sent;
   its unique index is what stops repeats), plus `medicine_batches.expired_flagged_at`.
+- `013`: stock idempotency keys may be up to 512 characters, so callers can prefix the client's
+  255-character `Idempotency-Key` (e.g. `request:42:dispense:<key>`).
 
 - Generic names are unique ignoring case. Medicines are unique on brand + manufacturer + form + strength;
   `prescription_required` defaults to true.
@@ -491,7 +493,27 @@ await stock.dispense({ shopId, medicineId, quantity, requestId, performedBy, ide
 | 4 | Mon Nov 10 | Real dispense: FEFO, atomic update, batch-order locks, idempotency (B8); adjust, writeOff (B9) ✅ |
 | 5 | Wed Nov 12 | reserve/release, STALE_INVENTORY, availability helper (B10), inventory list route ✅ |
 | 6 | Fri Nov 14 | Thresholds (B11), expiryScan + lowStockScan jobs, post-dispense low-stock check (B12), seed stock ✅ |
-| 7 | Sun Nov 16 | FEFO + concurrent dispense tests, edge cases 3, 5, 6, 14, 15; merge to main |
+| 7 | Sun Nov 16 | FEFO + concurrent dispense tests, edge cases 3, 5, 6, 14, 15; merge to main ✅ |
+
+#### Tests (Rachana)
+
+| What | File |
+| --- | --- |
+| FEFO planning (unit, no database) | `test/fefo.test.js` |
+| Edge cases 3, 5, 6, 14, 15 end to end over the API | `test/edge-cases.api.test.js` |
+| Concurrent dispense, idempotent races, reservations, owner edits | `test/dispense.db.test.js` |
+| Stock-in, ledger and writer guards, reserve / release | `test/stock.db.test.js` |
+| Inventory list, STALE_INVENTORY round trip, movements, availability | `test/inventory.api.test.js` |
+| Thresholds, expiry and low-stock jobs, seed | `test/alerts.db.test.js` |
+| Catalog constraints and API | `test/catalog.db.test.js`, `test/catalog.api.test.js` |
+
+#### Done criteria (Rachana)
+
+- [x] All 12 requirements (B1–B12) work through the API
+- [x] Stock can't go negative or be dispensed twice, proven by the concurrent dispense tests
+- [x] Edge cases 3, 5, 6, 14 and 15 have tests that pass
+- [x] Seven commits pushed (v1–v7)
+- [ ] Branch merged to main after review by Izaz
 
 ## Requests and referrals (Anushka)
 
