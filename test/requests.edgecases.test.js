@@ -228,7 +228,7 @@ t('edge case 12: patient no-show — hold expires, stock released, request steps
 
 // --- 13 ----------------------------------------------------------------------
 
-t('edge case 13: deactivated shop or medicine — refused everywhere it matters', async () => {
+t('edge case 13: deactivated shop or medicine — no new work, but open referrals can be finished', async () => {
   // deactivated origin shop
   const closedShop = await originShop();
   await pool.query('UPDATE shops SET is_active = false WHERE id = $1', [closedShop]);
@@ -242,19 +242,25 @@ t('edge case 13: deactivated shop or medicine — refused everywhere it matters'
   assert.ok(!look.body.items.some((i) => i.shop.id === gone));
   assert.equal((await post(`/requests/${req.id}/referrals`, 'origin', { toShopId: gone, quantity: 4 })).body.error.code, 'SHOP_INACTIVE');
 
-  // target deactivated after accepting: pickup is refused, nothing dispensed, the hold stays for the no-show job
+  // target deactivated after accepting: the open referral can still be finished (PRD edge case 13:
+  // "open requests can still be finished; nothing new can target them") — pickup dispenses the held units
   const later = await targetShop(4);
   const ref = await acceptedReferral(req.id, later, 4);
   await pool.query('UPDATE shops SET is_active = false WHERE id = $1', [later]);
   const pick = await post(`/referrals/${ref.id}/fulfil`, 'target', { requestNo: req.requestNo });
-  assert.equal(pick.status, 409);
-  assert.equal(pick.body.error.code, 'SHOP_INACTIVE');
-  assert.equal((await getRef(ref.id)).status, 'ACCEPTED');
-  assert.equal((await getReq(req.id)).fulfilledQty, 0);
-  // ...and the no-show job still releases the hold at the deactivated shop
-  await pool.query(`UPDATE referrals SET accepted_at = now() - interval '25 hours', hold_until = now() - interval '1 minute' WHERE id = $1`, [ref.id]);
-  assert.ok((await referrals.expireHolds()).noShow.includes(ref.id));
-  assert.deepEqual(await w.onHand(later), { quantity: 4, reserved: 0 });
+  assert.equal(pick.status, 200, JSON.stringify(pick.body));
+  assert.equal((await getRef(ref.id)).status, 'FULFILLED');
+  assert.equal((await getReq(req.id)).fulfilledQty, 4);
+  assert.deepEqual(await w.onHand(later), { quantity: 0, reserved: 0 });
+
+  // ...and if the patient never comes, the no-show job still releases the hold at the deactivated shop
+  const req2 = await ackedRequest(await originShop(), 4);
+  const later2 = await targetShop(4);
+  const ref2 = await acceptedReferral(req2.id, later2, 4);
+  await pool.query('UPDATE shops SET is_active = false WHERE id = $1', [later2]);
+  await pool.query(`UPDATE referrals SET accepted_at = now() - interval '25 hours', hold_until = now() - interval '1 minute' WHERE id = $1`, [ref2.id]);
+  assert.ok((await referrals.expireHolds()).noShow.includes(ref2.id));
+  assert.deepEqual(await w.onHand(later2), { quantity: 4, reserved: 0 });
 
   // deactivated medicine: no new requests, no lookup
   const { rows: [g] } = await pool.query(`INSERT INTO generics (name) VALUES ('edge13 generic ' || gen_random_uuid()) RETURNING id`);
@@ -299,4 +305,79 @@ t('edge case 16: expiry racing an acknowledge — exactly one wins, every time',
   await pool.query(`UPDATE stock_requests SET created_at = now() - interval '2 days', expires_at = now() - interval '1 second' WHERE id = $1`, [past.id]);
   assert.equal((await post(`/requests/${past.id}/acknowledge`, 'origin')).status, 409);
   assert.ok((await requests.expireDue()).expired.includes(past.id));
+});
+
+// --- review fixes (Nov 26) ------------------------------------------------------
+
+const phonesService = require('../src/modules/phones/phones.service');
+const stockService = require('../src/modules/inventory/stock.service');
+
+async function smsReferral(phone) {
+  const origin = await originShop();
+  const target = await targetShop(3);
+  const patientId = await w.patient(phone);
+  const req = await ackedRequest(origin, 3, { patientId });
+  const ref = await acceptedReferral(req.id, target, 3);
+  assert.equal(ref.patientContact.method, 'SMS');
+  await pool.query(`UPDATE patient_referral_messages SET queued_at = now() - interval '11 minutes' WHERE referral_id = $1`, [ref.id]);
+  return { origin, target, patientId, req, ref };
+}
+
+t('review fix: referral SMS names the origin shop and doctor, so a P13 unreachable alert reaches them', async () => {
+  const { origin, patientId } = await smsReferral('+919845013013');
+  await messages.sendDueBatches();
+  const { rows: [n] } = await pool.query(
+    `SELECT data FROM notifications WHERE recipient_type = 'PATIENT' AND recipient_id = $1 AND type = 'REFERRAL_READY'`, [patientId]);
+  const { rows: [doc] } = await pool.query(`SELECT id FROM users WHERE email = 'doctor@dosely.dev'`);
+  assert.equal(n.data.shopId, origin);
+  assert.equal(n.data.doctorUserId, doc.id);
+});
+
+t('review fix (F4.9, edge cases 9/10): phone unusable by the time the batch goes out → slip, origin shop told', async () => {
+  const { patientId, req, ref } = await smsReferral('+919845014014');
+  // the number goes bad after accept: 3 failed SMS in a row (P13)
+  const [phone] = await phonesService.list('PATIENT', patientId);
+  for (let i = 0; i < 3; i += 1) await phonesService.recordDeliveryFailure(phone.id);
+
+  const out = await messages.sendDueBatches();
+  assert.ok(out.slips >= 1);
+  const { rows: [m] } = await pool.query('SELECT method, status, sent_at FROM patient_referral_messages WHERE referral_id = $1', [ref.id]);
+  assert.deepEqual([m.method, m.status, m.sent_at], ['SLIP', 'SLIP', null]);
+
+  const { rows: alerts } = await pool.query(
+    `SELECT body FROM notifications WHERE type = 'REFERRAL_SMS_FAILED' AND user_id = $1 AND channel = 'IN_APP' AND body LIKE '%' || $2 || '%'`,
+    [w.origin.id, req.requestNo]);
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0].body, /PHONE_UNREACHABLE/);
+  const slip = await w.api('GET', `/referrals/${ref.id}/slip`, { token: w.origin.token });
+  assert.equal(slip.status, 200);
+  assert.ok(JSON.stringify(slip.body).includes(req.requestNo));
+
+  // nothing is queued for the patient, and running the job again does nothing more
+  const { rows: pending } = await pool.query(
+    `SELECT 1 FROM notifications WHERE recipient_type = 'PATIENT' AND recipient_id = $1 AND status = 'PENDING'`, [patientId]);
+  assert.equal(pending.length, 0);
+  await messages.sendDueBatches();
+  const { rows: again } = await pool.query(
+    `SELECT 1 FROM notifications WHERE type = 'REFERRAL_SMS_FAILED' AND user_id = $1 AND body LIKE '%' || $2 || '%'`, [w.origin.id, req.requestNo]);
+  assert.equal(again.length, 1);
+});
+
+t('review fix (edge case 13): open request can be finished at a deactivated shop; over-the-counter sales cannot', async () => {
+  const shop = await originShop();
+  await w.putStock(shop, 3);
+  const req = await ackedRequest(shop, 5);                 // shop is short: has 3 of 5
+  await pool.query('UPDATE shops SET is_active = false WHERE id = $1', [shop]);
+
+  const part = await post(`/requests/${req.id}/dispense`, 'origin', { quantity: 2 });
+  assert.equal(part.status, 200, JSON.stringify(part.body));
+  assert.equal((await getReq(req.id)).status, 'PARTIALLY_FULFILLED');
+
+  await assert.rejects(
+    stockService.dispense({ shopId: shop, medicineId: w.medicineId, quantity: 1, performedBy: w.adminId, idempotencyKey: `otc-${req.id}` }),
+    (e) => e.code === 'SHOP_INACTIVE'
+  );
+  assert.deepEqual(await w.onHand(shop), { quantity: 1, reserved: 0 });
+  // still no new work: a new request to the deactivated shop is refused
+  assert.equal((await send(shop, 3)).body.error.code, 'SHOP_INACTIVE');
 });
