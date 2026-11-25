@@ -63,6 +63,38 @@ async function assertShopActive(shopId, client, { allowInactive = false } = {}) 
   const { rows } = await client.query('SELECT is_active FROM shops WHERE id = $1 FOR SHARE', [shopId]);
   if (!rows[0]) throw AppError.notFound('Shop', shopId);
   if (!rows[0].is_active && !allowInactive) throw new AppError('SHOP_INACTIVE', 'Shop is inactive and cannot receive stock', { shopId });
+  return rows[0].is_active;
+}
+
+/**
+ * Edge case 13: at a deactivated shop, only open work may be finished. The ids
+ * must be real, or anyone could add a made-up requestId to keep selling over
+ * the counter:
+ *   - referralId: an ACCEPTED referral that targets this shop (and, if a
+ *     requestId is sent too, belongs to that request);
+ *   - requestId alone: a request at this shop that is open for dispensing
+ *     (ACKNOWLEDGED or PARTIALLY_FULFILLED).
+ * Anything else → 409 SHOP_INACTIVE, as for a plain over-the-counter sale.
+ */
+async function assertOpenWorkAtShop(input, client) {
+  const refuse = (why) => {
+    throw new AppError('SHOP_INACTIVE', 'Shop is inactive; only open requests and accepted referrals can be finished', {
+      shopId: input.shopId, requestId: input.requestId ?? null, referralId: input.referralId ?? null, reason: why,
+    });
+  };
+  if (input.referralId) {
+    const { rows: [r] } = await client.query(
+      'SELECT status, to_shop_id, request_id FROM referrals WHERE id = $1',
+      [input.referralId]
+    );
+    if (!r || r.status !== 'ACCEPTED' || Number(r.to_shop_id) !== input.shopId) refuse('referral is not an accepted referral to this shop');
+    if (input.requestId && Number(r.request_id) !== input.requestId) refuse('referral does not belong to this request');
+    return;
+  }
+  const { rows: [q] } = await client.query('SELECT status, shop_id FROM stock_requests WHERE id = $1', [input.requestId]);
+  if (!q || Number(q.shop_id) !== input.shopId || !['ACKNOWLEDGED', 'PARTIALLY_FULFILLED'].includes(q.status)) {
+    refuse('request is not open for dispensing at this shop');
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -448,8 +480,9 @@ async function replayDispense(input, client) {
  * @param {{client?: import('pg').PoolClient}} [opts]
  * @returns {Promise<{shopId:number, medicineId:number, quantity:number, replayed:boolean,
  *           lines: Array<{batchId:number, batchNo:string, expiryDate:string, quantity:number, movementId:number, balanceAfter:number}>}>}
- * @throws INSUFFICIENT_STOCK (409, details.available), SHOP_INACTIVE (only without requestId/referralId —
- *         edge case 13), IDEMPOTENCY_KEY_REUSED, VALIDATION_ERROR
+ * @throws INSUFFICIENT_STOCK (409, details.available), SHOP_INACTIVE (at a deactivated shop, unless it
+ *         finishes a real open request or accepted referral there — edge case 13), IDEMPOTENCY_KEY_REUSED,
+ *         VALIDATION_ERROR
  */
 async function dispense(input, opts = {}) {
   validateDispense(input);
@@ -462,7 +495,8 @@ async function dispense(input, opts = {}) {
       // accepted referrals can still be finished there (dispense with requestId /
       // referralId). Plain over-the-counter dispenses still need an active shop.
       const finishingOpenWork = Boolean(input.requestId || input.referralId);
-      await assertShopActive(input.shopId, client, { allowInactive: finishingOpenWork });
+      const shopActive = await assertShopActive(input.shopId, client, { allowInactive: finishingOpenWork });
+      if (!shopActive) await assertOpenWorkAtShop(input, client);
 
       let plan;
       if (input.reservation) {

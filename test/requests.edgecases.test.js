@@ -381,3 +381,39 @@ t('review fix (edge case 13): open request can be finished at a deactivated shop
   // still no new work: a new request to the deactivated shop is refused
   assert.equal((await send(shop, 3)).body.error.code, 'SHOP_INACTIVE');
 });
+
+t('edge case 13: at a deactivated shop, made-up or foreign request / referral ids cannot unlock a sale', async () => {
+  const shop = await originShop();
+  await w.putStock(shop, 10);
+  const otherShop = await originShop();
+  const foreignReq = await ackedRequest(otherShop, 2);          // open, but at another shop
+  const target = await targetShop(5);
+  const foreignRef = await acceptedReferral(foreignReq.id, target, 2); // accepted, but targets another shop
+  const own = await ackedRequest(shop, 11);                      // shop has 10, so it is short
+  await post(`/requests/${own.id}/close`, 'origin', { reason: 'patient left' });   // closed: not open work any more
+  await pool.query('UPDATE shops SET is_active = false WHERE id = $1', [shop]);
+
+  const sell = (extra) => stockService.dispense({
+    shopId: shop, medicineId: w.medicineId, quantity: 1, performedBy: w.adminId, idempotencyKey: `x-${Math.random()}`, ...extra,
+  });
+  for (const extra of [
+    { requestId: 999999 },                 // made up
+    { referralId: 999999 },                // made up
+    { requestId: foreignReq.id },          // another shop's request
+    { referralId: foreignRef.id },         // a referral to another shop
+    { requestId: own.id },                 // this shop's request, but closed
+  ]) {
+    await assert.rejects(sell(extra), (e) => {
+      assert.equal(e.code, 'SHOP_INACTIVE', JSON.stringify(extra));
+      return true;
+    });
+  }
+  assert.deepEqual(await w.onHand(shop), { quantity: 10, reserved: 0 });
+
+  // the same over the HTTP route a shop's staff would use
+  const r = await w.api('POST', `/shops/${shop}/dispense`, {
+    token: w.origin.token, key: `h-${Math.random()}`, body: { medicineId: w.medicineId, quantity: 1, requestId: 999999 },
+  });
+  assert.equal(r.status, 409);
+  assert.equal(r.body.error.code, 'SHOP_INACTIVE');
+});
