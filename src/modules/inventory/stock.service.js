@@ -59,10 +59,10 @@ function mapPgError(err) {
  * Throws NOT_FOUND / SHOP_INACTIVE unless the shop exists and is active.
  * FOR SHARE keeps it from being deactivated until this transaction ends.
  */
-async function assertShopActive(shopId, client) {
+async function assertShopActive(shopId, client, { allowInactive = false } = {}) {
   const { rows } = await client.query('SELECT is_active FROM shops WHERE id = $1 FOR SHARE', [shopId]);
   if (!rows[0]) throw AppError.notFound('Shop', shopId);
-  if (!rows[0].is_active) throw new AppError('SHOP_INACTIVE', 'Shop is inactive and cannot receive stock', { shopId });
+  if (!rows[0].is_active && !allowInactive) throw new AppError('SHOP_INACTIVE', 'Shop is inactive and cannot receive stock', { shopId });
 }
 
 // ---------------------------------------------------------------------------
@@ -448,7 +448,8 @@ async function replayDispense(input, client) {
  * @param {{client?: import('pg').PoolClient}} [opts]
  * @returns {Promise<{shopId:number, medicineId:number, quantity:number, replayed:boolean,
  *           lines: Array<{batchId:number, batchNo:string, expiryDate:string, quantity:number, movementId:number, balanceAfter:number}>}>}
- * @throws INSUFFICIENT_STOCK (409, details.available), SHOP_INACTIVE, IDEMPOTENCY_KEY_REUSED, VALIDATION_ERROR
+ * @throws INSUFFICIENT_STOCK (409, details.available), SHOP_INACTIVE (only without requestId/referralId —
+ *         edge case 13), IDEMPOTENCY_KEY_REUSED, VALIDATION_ERROR
  */
 async function dispense(input, opts = {}) {
   validateDispense(input);
@@ -457,7 +458,11 @@ async function dispense(input, opts = {}) {
 
   try {
     return await withTransaction(async (client) => {
-      await assertShopActive(input.shopId, client);
+      // Edge case 13: a deactivated shop takes no new work, but open requests and
+      // accepted referrals can still be finished there (dispense with requestId /
+      // referralId). Plain over-the-counter dispenses still need an active shop.
+      const finishingOpenWork = Boolean(input.requestId || input.referralId);
+      await assertShopActive(input.shopId, client, { allowInactive: finishingOpenWork });
 
       let plan;
       if (input.reservation) {
