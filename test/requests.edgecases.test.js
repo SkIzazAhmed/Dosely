@@ -417,3 +417,32 @@ t('edge case 13: at a deactivated shop, made-up or foreign request / referral id
   assert.equal(r.status, 409);
   assert.equal(r.body.error.code, 'SHOP_INACTIVE');
 });
+
+t('review fix (edge case 3): a held batch that expires before pickup fails with RESERVED_STOCK_EXPIRED', async () => {
+  const origin = await originShop();
+  const target = await targetShop(4);
+  const req = await ackedRequest(origin, 4);
+  const ref = await acceptedReferral(req.id, target, 4);
+  // the held batch expires while the patient is on the way
+  await pool.query(
+    `UPDATE medicine_batches SET expiry_date = current_date - 1
+      WHERE id IN (SELECT batch_id FROM inventory WHERE shop_id = $1)`, [target]);
+
+  const pick = await post(`/referrals/${ref.id}/fulfil`, 'target', { requestNo: req.requestNo });
+  assert.equal(pick.status, 409);
+  assert.equal(pick.body.error.code, 'RESERVED_STOCK_EXPIRED');
+  assert.ok(pick.body.error.details.batchId && pick.body.error.details.expiryDate);
+  assert.equal((await getRef(ref.id)).status, 'ACCEPTED', 'nothing changed — the referral can be re-reserved or rejected');
+  assert.deepEqual(await w.onHand(target), { quantity: 4, reserved: 4 });
+});
+
+t('review fix: a shortened patient SMS ends with "..." (GSM-7), never "…", and stays within 160', () => {
+  // one shop with a very long name: too long even after "+N more" compaction, so the text is cut
+  const items = [{ request_no: 'R-2026-00100', shop_name: `Sri ${'Venkateshwara '.repeat(8)}Medical and General Stores`, shop_area: 'Koramangala 6th Block' }];
+  const body = messages.composeSms(items);
+  assert.ok(body.length <= 160, String(body.length));
+  assert.ok(body.endsWith('...'), body);
+  assert.ok(!body.includes('…'));
+  // every character is plain ASCII, so it fits the GSM-7 160-character limit
+  assert.ok(/^[\x20-\x7E]*$/.test(body), body);
+});

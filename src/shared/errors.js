@@ -79,6 +79,7 @@ const ErrorCodes = Object.freeze({
   BATCH_EXPIRED: { status: 422, message: 'Batch is expired' },
   BATCH_MISMATCH: { status: 409, message: 'Batch number is already known with a different expiry date or MRP' },
   INSUFFICIENT_STOCK: { status: 409, message: 'Not enough non-expired stock' },
+  RESERVED_STOCK_EXPIRED: { status: 409, message: 'Reserved stock has expired; release the hold and re-reserve from another batch, or reject the referral' },
   STALE_INVENTORY: { status: 409, message: 'Inventory changed since you read it; reload and try again' },
   REASON_REQUIRED: { status: 400, message: 'A reason is required for this stock change' },
 
