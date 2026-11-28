@@ -84,7 +84,9 @@ function composeSms(items) {
   for (let n = parts.length - 1; body.length > SMS_MAX && n >= 1; n--) {
     body = `${head}${parts.slice(0, n).join('; ')} +${parts.length - n} more.`;
   }
-  return body.length > SMS_MAX ? `${body.slice(0, SMS_MAX - 1)}…` : body;
+  // '...' not '…': the ellipsis isn't in the GSM-7 alphabet, so gateways would send the SMS
+  // as Unicode, where the limit is 70 characters instead of 160.
+  return body.length > SMS_MAX ? `${body.slice(0, SMS_MAX - 3)}...` : body;
 }
 
 /**

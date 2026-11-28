@@ -68,7 +68,7 @@ const THRESHOLDS = [
 
 async function seed(client) {
   const { rows: [admin] } = await client.query(`SELECT id FROM users WHERE email = 'admin@dosely.dev'`);
-  if (!admin) throw new Error('003_catalog_stock needs the admin user from 001_demo_users');
+  if (!admin) throw new Error('010_catalog_stock needs the admin user from 001_demo_users');
 
   const genericIds = new Map();
   for (const name of new Set(MEDICINES.map((m) => m[1]))) {

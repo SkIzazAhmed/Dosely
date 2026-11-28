@@ -476,7 +476,7 @@ await stock.dispense({ shopId, medicineId, quantity, requestId, performedBy, ide
 | Function | Errors |
 | --- | --- |
 | `stockIn({ shopId, medicineId, batchNo, expiryDate, manufactureDate?, mrp, quantity, performedBy, reason?, idempotencyKey? })` | 422 `BATCH_EXPIRED`, 409 `BATCH_MISMATCH` |
-| `dispense({ shopId, medicineId, quantity, performedBy, idempotencyKey, requestId?, referralId?, reservation? })` | 409 `INSUFFICIENT_STOCK` |
+| `dispense({ shopId, medicineId, quantity, performedBy, idempotencyKey, requestId?, referralId?, reservation? })` | 409 `INSUFFICIENT_STOCK`, 409 `RESERVED_STOCK_EXPIRED` (held batch expired before pickup — edge case 3), 409 `SHOP_INACTIVE` (deactivated shop, unless finishing a real open request or accepted referral there — edge case 13) |
 | `adjust({ shopId, batchId, delta, expectedVersion, reason, performedBy })` — OWNER | 409 `STALE_INVENTORY`, 400 `REASON_REQUIRED` |
 | `writeOff({ shopId, batchId, quantity?, expectedVersion?, reason, performedBy })` — OWNER | 409 `STALE_INVENTORY`, 409 `INSUFFICIENT_STOCK` |
 | `reserve({ shopId, medicineId, quantity, referralId, performedBy })` → `{ lines }` | 409 `INSUFFICIENT_STOCK` |

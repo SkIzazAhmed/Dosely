@@ -227,7 +227,8 @@ function checkLines(lines, errors) {
  * @param {{client?: import('pg').PoolClient}} [opts]
  * @returns {Promise<{shopId:number, medicineId:number, referralId:number,
  *           lines: Array<{batchId:number, batchNo:string, expiryDate:string, quantity:number}>, replayed:false}>}
- * @throws INSUFFICIENT_STOCK (409, details.available), SHOP_INACTIVE, NOT_FOUND
+ * @throws INSUFFICIENT_STOCK (409, details.available), RESERVED_STOCK_EXPIRED (409, a held batch expired
+ *         before pickup — edge case 3), SHOP_INACTIVE, NOT_FOUND
  */
 async function reserve(input, opts = {}) {
   if (!input || typeof input !== 'object') throw AppError.validation([{ field: 'input', issue: 'required' }]);
@@ -480,7 +481,8 @@ async function replayDispense(input, client) {
  * @param {{client?: import('pg').PoolClient}} [opts]
  * @returns {Promise<{shopId:number, medicineId:number, quantity:number, replayed:boolean,
  *           lines: Array<{batchId:number, batchNo:string, expiryDate:string, quantity:number, movementId:number, balanceAfter:number}>}>}
- * @throws INSUFFICIENT_STOCK (409, details.available), SHOP_INACTIVE (at a deactivated shop, unless it
+ * @throws INSUFFICIENT_STOCK (409, details.available), RESERVED_STOCK_EXPIRED (409, a held batch expired
+ *         before pickup — edge case 3), SHOP_INACTIVE (at a deactivated shop, unless it
  *         finishes a real open request or accepted referral there — edge case 13), IDEMPOTENCY_KEY_REUSED,
  *         VALIDATION_ERROR
  */
@@ -517,9 +519,16 @@ async function dispense(input, opts = {}) {
         const byBatch = new Map(rows.map((r) => [Number(r.batch_id), r]));
         plan = input.reservation.map((l) => {
           const r = byBatch.get(l.batchId);
-          if (!r || r.medicine_id !== input.medicineId || r.expired || r.reserved < l.quantity) {
+          // Edge case 3: the held batch expired before pickup. Say so explicitly, so the referral
+          // flow can release the hold and re-reserve from another batch, or reject with "stock expired".
+          if (r && r.medicine_id === input.medicineId && r.expired) {
+            throw new AppError('RESERVED_STOCK_EXPIRED', undefined, {
+              batchId: l.batchId, batchNo: r.batch_no, expiryDate: r.expiry_date, reserved: r.reserved, requested: l.quantity,
+            });
+          }
+          if (!r || r.medicine_id !== input.medicineId || r.reserved < l.quantity) {
             throw new AppError('INSUFFICIENT_STOCK', 'Reserved stock is no longer available', {
-              batchId: l.batchId, reserved: r ? r.reserved : 0, requested: l.quantity, expired: r ? r.expired : undefined,
+              batchId: l.batchId, reserved: r ? r.reserved : 0, requested: l.quantity,
             });
           }
           return { r, qty: l.quantity, fromReserved: true };
